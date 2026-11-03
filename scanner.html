@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scanner — Pulo do Gato</title>
+<style>
+  /* Página SEPARADA do scanner (só no PC): depois será unida ao app como o botão 14. Cores do tema azul-acinzentado do app. */
+  :root { --fundo:#dce8f0; --borda:#b4c8d4; --borda2:#98b4c4; --texto:#1a2a35; --acento:#1a88a8; --card:#ffffff; --aviso:#922b21; --mudo:#5b7585; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: var(--fundo); color: var(--texto); display: flex; justify-content: center; min-height: 100svh; }
+  main { width: 100%; max-width: 480px; padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 18px; }
+  .card { background: var(--card); border: 1px solid var(--borda); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--mudo); }
+  .linha { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button, select, input[type=number] { font: inherit; font-size: 14px; color: var(--texto); background: #eef4f8; border: 1px solid var(--borda2); border-radius: 8px; padding: 8px 10px; min-height: 40px; }
+  button { cursor: pointer; background: var(--acento); color: #fff; border-color: var(--acento); }
+  button.sec { background: #eef4f8; color: var(--texto); border-color: var(--borda2); }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=number] { width: 96px; }
+  input[type=file] { font-size: 13px; max-width: 100%; }
+  #msg { font-size: 13px; color: var(--mudo); min-height: 18px; }
+  #msg.erro { color: var(--aviso); }
+  #cena { width: 100%; height: 220px; background: #eaf1f6; border: 1px solid var(--borda); border-radius: 8px; touch-action: none; display: block; }
+  .abas { display: flex; gap: 6px; }
+  .abas button { flex: 1; background: #eef4f8; color: var(--texto); border-color: var(--borda2); }
+  .abas button.on { background: var(--acento); color: #fff; border-color: var(--acento); }
+  #vista { width: 100%; height: 260px; background: #fff; border: 1px solid var(--borda); border-radius: 8px; }
+  #vista .vis { stroke: #1a2a35; stroke-width: 1.6; fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; }
+  #vista .oc { stroke: #5b7585; stroke-width: 1.1; stroke-dasharray: 5 4; fill: none; vector-effect: non-scaling-stroke; }
+  #vista .eixo { stroke: #1a88a8; stroke-width: 1; stroke-dasharray: 14 3 2 3; fill: none; vector-effect: non-scaling-stroke; }
+  #vista text { font-size: 11px; fill: #1a2a35; font-family: 'Segoe UI', sans-serif; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: Consolas, monospace; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--borda); }
+  th { color: var(--mudo); font-weight: 600; font-family: 'Segoe UI', sans-serif; }
+  .peq { font-size: 12px; color: var(--mudo); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Scanner — malha para vistas e diâmetros</h1>
+
+  <div class="card">
+    <h2>1 · Peça</h2>
+    <input type="file" id="arquivo" accept=".stl,.obj,.ply">
+    <div class="linha">
+      <button class="sec" id="exemplo">Peça de exemplo (flange)</button>
+      <button class="sec" id="endireita" disabled>Endireitar de novo</button>
+    </div>
+    <div id="msg">Carregue uma malha STL, OBJ ou PLY (a que sai do vídeo, ou de um app de escaneamento).</div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Visão 3D</h2>
+    <canvas id="cena"></canvas>
+    <div class="linha">
+      <span class="peq">Se a peça ficou deitada de lado, gire 90°:</span>
+      <button class="sec" data-gira="0" disabled>X</button>
+      <button class="sec" data-gira="1" disabled>Y</button>
+      <button class="sec" data-gira="2" disabled>Z</button>
+    </div>
+    <div class="peq" id="dim">—</div>
+  </div>
+
+  <div class="card">
+    <h2>3 · Escala (uma medida real)</h2>
+    <div class="linha">
+      <select id="eixo"><option value="0">X</option><option value="1">Y</option><option value="2">Z</option></select>
+      <input type="number" id="mm" min="0.1" step="0.01" placeholder="mm">
+      <button id="escala" disabled>Aplicar</button>
+    </div>
+    <div class="peq">Meça com o paquímetro uma dimensão da peça e diga qual eixo ela é. Todo o resto sai na mesma proporção.</div>
+  </div>
+
+  <div class="card">
+    <h2>4 · Vistas</h2>
+    <div class="abas" id="abas"><button data-v="frontal" class="on">Frontal</button><button data-v="superior">Superior</button><button data-v="lateral">Lateral</button></div>
+    <svg id="vista" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="peq">Traço cheio = visível · tracejado = oculto · traço-ponto azul = eixo de furo/cilindro.</div>
+  </div>
+
+  <div class="card">
+    <h2>5 · Diâmetros achados</h2>
+    <table id="tab"><thead><tr><th>Tipo</th><th>⌀</th><th>Centro</th><th>Prof.</th></tr></thead><tbody></tbody></table>
+  </div>
+</main>
+
+<script src="vendor-three.js"></script>
+<script src="scanner.js"></script>
+<script>
+(function () {
+  let malha = null, relatorio = null, vistaAtual = "frontal", escalou = false;
+  const $ = (id) => document.getElementById(id);
+  const msg = (t, erro) => { const m = $("msg"); m.textContent = t; m.className = erro ? "erro" : ""; };
+  const fmt = (v) => (Math.abs(v) < 1e-6 ? 0 : v).toFixed(2).replace(/\.?0+$/, "");
+
+  // ── 3D simples: a malha, girada com o dedo/mouse ──
+  const cv = $("cena");
+  const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true });
+  const cena = new THREE.Scene(); cena.background = new THREE.Color(0xeaf1f6);
+  const cam = new THREE.PerspectiveCamera(35, 1, 0.1, 100000);
+  cena.add(new THREE.HemisphereLight(0xffffff, 0x8aa0b0, 0.9));
+  const sol = new THREE.DirectionalLight(0xffffff, 0.8); sol.position.set(1, 2, 3); cena.add(sol);
+  const grupo = new THREE.Group(); cena.add(grupo);
+  let ang = { x: -0.6, z: 0.6 }, dist = 100, centro = new THREE.Vector3();
+  function desenha3D() {
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (cv.width !== w * devicePixelRatio || cv.height !== h * devicePixelRatio) { renderer.setPixelRatio(devicePixelRatio); renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix(); }
+    grupo.rotation.set(ang.x, 0, ang.z, "ZXY");
+    cam.position.set(0, -dist, dist * 0.35); cam.up.set(0, 0, 1); cam.lookAt(0, 0, 0);
+    renderer.render(cena, cam);
+  }
+  function mostra3D() {
+    while (grupo.children.length) { const o = grupo.children.pop(); o.geometry && o.geometry.dispose(); }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(malha.pos, 3));
+    g.setIndex(new THREE.BufferAttribute(malha.ind, 1)); g.computeVertexNormals();
+    const caixa = scnCaixa(malha), c = caixa.lo.map((v, i) => (v + caixa.hi[i]) / 2);
+    const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x6f8fa3, metalness: 0.3, roughness: 0.55, side: THREE.DoubleSide }));
+    m.position.set(-c[0], -c[1], -c[2]);
+    const arestas = new THREE.LineSegments(new THREE.EdgesGeometry(g, 25), new THREE.LineBasicMaterial({ color: 0x1a2a35 }));
+    arestas.position.copy(m.position);
+    grupo.add(m, arestas);
+    dist = Math.hypot(...caixa.dim) * 1.9 || 100;
+    desenha3D();
+  }
+  let arrasta = null;
+  cv.addEventListener("pointerdown", (e) => { arrasta = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener("pointermove", (e) => { if (!arrasta) return; ang.z += (e.clientX - arrasta[0]) * 0.01; ang.x += (e.clientY - arrasta[1]) * 0.01; arrasta = [e.clientX, e.clientY]; desenha3D(); });
+  cv.addEventListener("pointerup", () => { arrasta = null; });
+  cv.addEventListener("wheel", (e) => { e.preventDefault(); dist *= e.deltaY > 0 ? 1.1 : 0.9; desenha3D(); }, { passive: false });
+  addEventListener("resize", () => malha && desenha3D());
+
+  // ── análise e telas ──
+  function reposiciona() { // canto da caixa no zero
+    const c = scnCaixa(malha);
+    malha = scnAplica(malha, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], [-c.lo[0], -c.lo[1], -c.lo[2]]);
+  }
+  function analisa() {
+    relatorio = scnAnalisa(malha);
+    const d = relatorio.caixa.dim;
+    $("dim").textContent = "Caixa: X " + fmt(d[0]) + " × Y " + fmt(d[1]) + " × Z " + fmt(d[2]) + (escalou ? " mm" : " (unidades da malha; aplique a escala)") + " · volume " + fmt(relatorio.volume / (escalou ? 1000 : 1)) + (escalou ? " cm³" : "");
+    desenhaVista(); preencheTabela();
+    ["endireita", "escala"].forEach((i) => ($(i).disabled = false));
+    document.querySelectorAll("[data-gira]").forEach((b) => (b.disabled = false));
+  }
+  function desenhaVista() {
+    const v = relatorio.vistas[vistaAtual], svg = $("vista"), c = v.caixa;
+    const larg = c.u1 - c.u0 || 1, alt = c.v1 - c.v0 || 1, m = Math.max(larg, alt) * 0.08;
+    svg.setAttribute("viewBox", [c.u0 - m, -(c.v1 + m), larg + 2 * m, alt + 2 * m].join(" "));
+    const L = (s, cl) => `<line class="${cl}" x1="${s[0].toFixed(3)}" y1="${(-s[1]).toFixed(3)}" x2="${s[2].toFixed(3)}" y2="${(-s[3]).toFixed(3)}"/>`;
+    // eixos dos cilindros que aparecem de frente (círculos) ou de lado (retas) nesta vista
+    const V = SCN_VISTAS[vistaAtual], proj = (p) => [p[0] * V.u[0] + p[1] * V.u[1] + p[2] * V.u[2], p[0] * V.v[0] + p[1] * V.v[1] + p[2] * V.v[2]];
+    let eixos = "";
+    relatorio.cilindros.forEach((cl) => {
+        const p0 = [0, 0, 0], p1 = [0, 0, 0]; p0[cl.plano[0]] = p1[cl.plano[0]] = cl.centro[0]; p0[cl.plano[1]] = p1[cl.plano[1]] = cl.centro[1]; p0[cl.eixo] = cl.de; p1[cl.eixo] = cl.ate;
+        const a = proj(p0), b = proj(p1), ext = cl.diametro * 0.12;
+        if (Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6) { // visto de frente: cruz de centro
+            eixos += L([a[0] - cl.diametro * 0.7, a[1], a[0] + cl.diametro * 0.7, a[1]], "eixo") + L([a[0], a[1] - cl.diametro * 0.7, a[0], a[1] + cl.diametro * 0.7], "eixo");
+        } else { const dx = b[0] - a[0], dy = b[1] - a[1], n = Math.hypot(dx, dy); eixos += L([a[0] - dx / n * ext, a[1] - dy / n * ext, b[0] + dx / n * ext, b[1] + dy / n * ext], "eixo"); }
+    });
+    const tx = (x, y, t, a) => `<text x="${x}" y="${-y}" text-anchor="${a}" style="font-size:${Math.max(larg, alt) * 0.045}px">${t}</text>`;
+    svg.innerHTML = eixos + v.ocultas.map((s) => L(s, "oc")).join("") + v.visiveis.map((s) => L(s, "vis")).join("") +
+        tx(c.u0 + larg / 2, c.v0 - m * 0.45, fmt(larg), "middle") + tx(c.u1 + m * 0.2, c.v0 + alt / 2, fmt(alt), "start");
+  }
+  function preencheTabela() {
+    $("tab").tBodies[0].innerHTML = relatorio.cilindros.map((c) => {
+      const eixoNome = "XYZ"[c.eixo], pos = c.plano.map((i, k) => "XYZ"[i] + fmt(c.centro[k])).join(" ");
+      return `<tr><td>${c.furo ? "furo" : "externo"}${c.arco ? " (arco)" : ""}</td><td>${fmt(c.diametro)}</td><td>${pos}</td><td>${eixoNome} ${fmt(c.de)}→${fmt(c.ate)}</td></tr>`;
+    }).join("") || '<tr><td colspan="4">nenhum cilindro encontrado</td></tr>';
+  }
+  function carrega(m, origem) {
+    try {
+      malha = scnEndireita(scnSolda(m)); escalou = false;
+      mostra3D(); analisa();
+      msg(origem + ": " + (malha.ind.length / 3) + " triângulos. Peça endireitada; falta aplicar a escala.");
+    } catch (e) { msg("Não consegui ler a malha: " + e.message, true); }
+  }
+
+  $("arquivo").addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { carrega(scnLerMalha(await f.arrayBuffer(), f.name), f.name); } catch (er) { msg("Não consegui ler " + f.name + ": " + er.message, true); }
+  });
+  $("endireita").addEventListener("click", () => { malha = scnEndireita(malha); mostra3D(); analisa(); msg("Endireitada de novo."); });
+  document.querySelectorAll("[data-gira]").forEach((b) => b.addEventListener("click", () => {
+    const e = +b.dataset.gira, R = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], [p, q] = [[1, 2], [2, 0], [0, 1]][e];
+    R[p][p] = 0; R[p][q] = -1; R[q][p] = 1; R[q][q] = 0; // 90° em torno do eixo e
+    malha = scnAplica(malha, R); reposiciona(); mostra3D(); analisa();
+  }));
+  $("escala").addEventListener("click", () => {
+    const mm = parseFloat($("mm").value);
+    if (!(mm > 0)) { msg("Digite a medida em mm.", true); return; }
+    malha = scnEscalaPorEixo(malha, +$("eixo").value, mm); escalou = true; reposiciona(); mostra3D(); analisa();
+    msg("Escala aplicada: eixo " + "XYZ"[+$("eixo").value] + " = " + fmt(mm) + " mm.");
+  });
+  document.querySelectorAll("#abas button").forEach((b) => b.addEventListener("click", () => {
+    vistaAtual = b.dataset.v; document.querySelectorAll("#abas button").forEach((x) => x.classList.toggle("on", x === b)); if (relatorio) desenhaVista();
+  }));
+  $("exemplo").addEventListener("click", async () => {
+    msg("Montando o exemplo…");
+    try {
+      const mod = await import("./vendor-manifold.mjs"), w = await mod.default({ locateFile: () => "vendor-manifold.wasm" }); w.setup();
+      const M = w.Manifold; let fl = M.cylinder(12, 50, 50, 96).subtract(M.cylinder(12, 15, 15, 64));
+      for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + Math.PI / 4; fl = fl.subtract(M.cylinder(12, 5, 5, 48).translate([35 * Math.cos(a), 35 * Math.sin(a), 0])); }
+      const me = fl.getMesh(), np = me.numProp, pos = new Float32Array(me.vertProperties.length / np * 3);
+      for (let i = 0; i < pos.length / 3; i++) { pos[3 * i] = me.vertProperties[np * i] * 0.04 + 1; pos[3 * i + 1] = me.vertProperties[np * i + 1] * 0.04; pos[3 * i + 2] = me.vertProperties[np * i + 2] * 0.04; }
+      carrega({ pos, ind: Uint32Array.from(me.triVerts) }, "Flange de exemplo (em escala errada de propósito: diga ⌀ 100 no eixo X)");
+    } catch (e) { msg("O exemplo precisa da página servida por http (vendor-manifold): " + e.message, true); }
+  });
+})();
+</script>
+</body>
+</html>
