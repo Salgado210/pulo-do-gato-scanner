@@ -60,11 +60,12 @@ import { SamModel, AutoProcessor, RawImage, env } from "https://cdn.jsdelivr.net
 const $ = (id) => document.getElementById(id);
 const MODELO = "Xenova/slimsam-77-uniform";
 const LADO = 1024; // maior lado da foto enviada ao modelo
-let modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
+let gpuAtivo = false, modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
 
 env.allowLocalModels = false;
 env.useBrowserCache = true; // guarda o modelo no celular (Cache API): da segunda vez não precisa de internet
 
+let carregaModelo = null;
 const msg = (id, t, erro) => { const e = $(id); e.textContent = t; e.classList.toggle("erro", !!erro); };
 
 $("carrega").addEventListener("click", async () => {
@@ -81,12 +82,17 @@ $("carrega").addEventListener("click", async () => {
   };
   try {
     msg("stModelo", "Iniciando o download…");
-    [modelo, proc] = await Promise.all([
-      SamModel.from_pretrained(MODELO, { dtype: "q8", progress_callback: progresso }),
-      AutoProcessor.from_pretrained(MODELO, { progress_callback: progresso }),
-    ]);
+    // a análise da foto é a parte pesada: com placa de vídeo (WebGPU) ela é bem mais rápida; sem ela, cai para o processador
+    let gpu = false;
+    try { const ad = navigator.gpu && await navigator.gpu.requestAdapter(); gpu = !!(ad && ad.features.has("shader-f16")); } catch (e) {}
+    carregaModelo = (usaGpu) => SamModel.from_pretrained(MODELO, usaGpu
+      ? { device: { vision_encoder: "webgpu", prompt_encoder_mask_decoder: "wasm" }, dtype: { vision_encoder: "fp16", prompt_encoder_mask_decoder: "q8" }, progress_callback: progresso }
+      : { dtype: "q8", progress_callback: progresso });
+    proc = await AutoProcessor.from_pretrained(MODELO, { progress_callback: progresso });
+    try { modelo = await carregaModelo(gpu); } catch (e) { if (!gpu) throw e; gpu = false; modelo = await carregaModelo(false); }
+    gpuAtivo = gpu;
     $("barra").firstElementChild.style.width = "100%";
-    msg("stModelo", "Modelo pronto em " + ((performance.now() - t0) / 1000).toFixed(1) + " s.");
+    msg("stModelo", "Modelo pronto em " + ((performance.now() - t0) / 1000).toFixed(1) + " s · rodando " + (gpu ? "na placa de vídeo (WebGPU)" : "no processador (mais lento)") + ".");
     if (imagem) await preparaFoto();
   } catch (e) { modelo = null; $("carrega").disabled = false; msg("stModelo", "Não consegui carregar o modelo: " + (e && e.message || e), true); }
 });
@@ -118,7 +124,13 @@ async function preparaFoto() {
     emb = { ...(await modelo.get_image_embeddings(ent)), ent, raw };
     msg("stFoto", "Foto analisada em " + ((performance.now() - t0) / 1000).toFixed(1) + " s. Toque na peça.");
     ["modo", "desfaz", "limpa"].forEach((i) => { $(i).disabled = false; });
-  } catch (e) { msg("stFoto", "Erro ao analisar a foto: " + (e && e.message || e), true); }
+  } catch (e) {
+    if (gpuAtivo) { // a placa de vídeo falhou na hora de analisar: volta para o processador e tenta de novo
+      gpuAtivo = false; msg("stFoto", "A placa de vídeo falhou; trocando para o processador…");
+      try { modelo = await carregaModelo(false); espera(false); return preparaFoto(); } catch (e2) { e = e2; }
+    }
+    msg("stFoto", "Erro ao analisar a foto: " + (e && e.message || e), true);
+  }
   espera(false);
 }
 const espera = (b) => { ocupado = b; $("palco").classList.toggle("espera", b); };
