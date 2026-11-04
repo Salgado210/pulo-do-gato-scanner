@@ -44,7 +44,7 @@
 </details>
 
 <div class="card">
-  <b>1 · Foto da peça (fundo preto ou azul liso)</b>
+  <b>1 · Foto da peça (fundo liso: papel branco, preto ou azul)</b>
   <div class="linha">
     <button id="camAbre">Fotografar a peça</button>
     <label class="bt sec" for="arq">Escolher da galeria</label>
@@ -59,7 +59,7 @@
     <button id="desfaz" class="sec" disabled>Desfazer</button>
     <button id="limpa" class="sec" disabled>Limpar</button>
   </div>
-  <div class="peq" id="stFoto">Coloque a peça num fundo liso, fotografe e o esboço sai sozinho.</div>
+  <div class="peq" id="stFoto">Coloque a peça sobre papel branco (ou fundo preto/azul liso), fotografe e o esboço sai sozinho.</div>
 </div>
 
 <div id="camTela" hidden>
@@ -162,10 +162,10 @@ async function usaImagem(im, iw, ih) {
     for (const c of [$("foto"), $("sobre")]) { c.width = w; c.height = h; }
     $("foto").getContext("2d").drawImage(im, 0, 0, w, h);
     imagem = $("foto"); pts = []; mascara = null; emb = null; $("palco").hidden = false; desenha();
-    passo("separando a peça do fundo"); const ch = chaveFundo();
+    passo("separando a peça do fundo"); const ch = chaveFundo(); passo("fim");
     if (ch) { viaModelo = false; mascara = ch; passo("desenhando o esboço"); desenha(); esboco(); passo("fim"); msg("stFoto", "Fundo liso detectado (cor " + ch.fundo.map(Math.round).join(",") + "): peça separada sem IA e sem toque."); return; }
     viaModelo = true;
-    if (modelo) await preparaFoto(); else msg("stFoto", "O fundo não é liso, então preciso do modelo de IA. Toque em Carregar modelo.");
+    if (modelo) await preparaFoto(); else msg("stFoto", "Não consegui separar a peça do fundo (fundo irregular ou peça encostada na borda). Afaste a peça das bordas e use fundo liso, ou abra \"Só se o fundo NÃO for liso: usar IA\" lá em cima.", true);
   }
 }
 
@@ -321,17 +321,66 @@ function furosEscuros(m) { // o modelo costuma incluir o interior escuro do furo
   return res;
 }
 // ── caminho principal: fundo liso (preto, azul, qualquer cor uniforme) separa a peça sozinho, sem IA ──
+function suaviza(d, W, H, R) { // média (2R+1)² por canal, em duas passadas; devolve Uint8Array(W*H*3)
+  const out = new Uint8Array(W * H * 3), t = new Float32Array(W * H);
+  for (let ch = 0; ch < 3; ch++) {
+    for (let y = 0; y < H; y++) { // horizontal
+      let soma = 0, n = 0;
+      for (let x = 0; x <= R && x < W; x++) { soma += d[4 * (y * W + x) + ch]; n++; }
+      for (let x = 0; x < W; x++) {
+        t[y * W + x] = soma / n;
+        const sai = x - R, entra = x + R + 1;
+        if (sai >= 0) { soma -= d[4 * (y * W + sai) + ch]; n--; }
+        if (entra < W) { soma += d[4 * (y * W + entra) + ch]; n++; }
+      }
+    }
+    for (let x = 0; x < W; x++) { // vertical
+      let soma = 0, n = 0;
+      for (let y = 0; y <= R && y < H; y++) { soma += t[y * W + x]; n++; }
+      for (let y = 0; y < H; y++) {
+        out[3 * (y * W + x) + ch] = soma / n;
+        const sai = y - R, entra = y + R + 1;
+        if (sai >= 0) { soma -= t[sai * W + x]; n--; }
+        if (entra < H) { soma += t[entra * W + x]; n++; }
+      }
+    }
+  }
+  return out;
+}
+function agrupaCores(am, K) { // k-means em RGB sobre a borda: cada grupo é um "tom do fundo" (degradê, brilho, grão)
+  const n = am.length, lum = (a) => 0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2];
+  const ord = am.map((_, i) => i).sort((p, q) => lum(am[p]) - lum(am[q]));
+  let mu = Array.from({ length: K }, (_, k) => am[ord[Math.floor((k + 0.5) * n / K)]].slice()), lab = new Int32Array(n);
+  for (let it = 0; it < 10; it++) {
+    for (let i = 0; i < n; i++) { let b = 0, bd = 1e18; for (let k = 0; k < K; k++) { const d = (am[i][0] - mu[k][0]) ** 2 + (am[i][1] - mu[k][1]) ** 2 + (am[i][2] - mu[k][2]) ** 2; if (d < bd) { bd = d; b = k; } } lab[i] = b; }
+    const soma = Array.from({ length: K }, () => [0, 0, 0, 0]);
+    for (let i = 0; i < n; i++) { const s = soma[lab[i]]; s[0] += am[i][0]; s[1] += am[i][1]; s[2] += am[i][2]; s[3]++; }
+    mu = mu.map((m, k) => (soma[k][3] ? [soma[k][0] / soma[k][3], soma[k][1] / soma[k][3], soma[k][2] / soma[k][3]] : m));
+  }
+  const grupos = [];
+  for (let k = 0; k < K; k++) {
+    let cnt = 0, q = 0; for (let i = 0; i < n; i++) if (lab[i] === k) { cnt++; q += (am[i][0] - mu[k][0]) ** 2 + (am[i][1] - mu[k][1]) ** 2 + (am[i][2] - mu[k][2]) ** 2; }
+    if (cnt >= 0.04 * n) grupos.push({ mu: mu[k], r: Math.max(18, 2.8 * Math.sqrt(q / cnt / 3) * 1.7), w: cnt / n }); // grupo com menos de 4 % é a peça encostando na borda: ignora
+  }
+  return grupos;
+}
 function chaveFundo() {
   const c = $("foto"), W = c.width, H = c.height, d = c.getContext("2d").getImageData(0, 0, W, H).data, B = Math.max(4, Math.round(0.03 * Math.min(W, H)));
+  const sm = suaviza(d, W, H, 2); // o grão do couro ou da mesa não vira "peça"
   const borda = (x, y) => x < B || y < B || x >= W - B || y >= H - B;
-  const hr = new Uint32Array(256), hg = new Uint32Array(256), hb = new Uint32Array(256); let nb = 0;
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) { const i = 4 * (y * W + x); hr[d[i]]++; hg[d[i + 1]]++; hb[d[i + 2]]++; nb++; }
-  const med = (h) => { let a = 0; for (let v = 0; v < 256; v++) { a += h[v]; if (a >= nb / 2) return v; } return 0; }, fr = [med(hr), med(hg), med(hb)];
-  const dist = new Float32Array(W * H), hd = new Uint32Array(1024);
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; dist[i] = Math.hypot(d[4 * i] - fr[0], d[4 * i + 1] - fr[1], d[4 * i + 2] - fr[2]); if (borda(x, y)) hd[Math.min(1023, dist[i] | 0)]++; }
-  let acc = 0, p95 = 0; for (let v = 0; v < 1024; v++) { acc += hd[v]; if (acc >= 0.95 * nb) { p95 = v; break; } }
-  if (p95 > 45) return null; // a borda não é um fundo liso: cai para o modelo de IA
-  const T = Math.max(40, 3 * p95), lab = new Int32Array(W * H), pil = new Int32Array(W * H); let melhor = 0, nMelhor = 0, nl = 0;
+  const am = [];
+  for (let y = 0; y < H; y += 3) for (let x = 0; x < W; x += 3) if (borda(x, y)) { const i = 3 * (y * W + x); am.push([sm[i], sm[i + 1], sm[i + 2]]); }
+  const gr = agrupaCores(am, 5);
+  if (!gr.length) return null;
+  const dist = new Float32Array(W * H); let dentro = 0, nb = 0; // dist < 1: parece fundo
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, j = 3 * i; let m = 1e9;
+    for (const g of gr) { const dd = Math.sqrt((sm[j] - g.mu[0]) ** 2 + (sm[j + 1] - g.mu[1]) ** 2 + (sm[j + 2] - g.mu[2]) ** 2) / g.r; if (dd < m) m = dd; }
+    dist[i] = m; if (borda(x, y)) { nb++; if (m <= 1) dentro++; }
+  }
+  const cobre = dentro / nb; chaveFundo.info = { cobre, grupos: gr.length, w: gr.map((g) => +g.w.toFixed(2)) };
+  if (cobre < 0.85) return null; // a borda não é um fundo reconhecível: cai para o modelo de IA
+  const T = 1, lab = new Int32Array(W * H), pil = new Int32Array(W * H); let melhor = 0, nMelhor = 0, nl = 0;
   for (let i0 = 0; i0 < W * H; i0++) {
     if (dist[i0] <= T || lab[i0]) continue;
     nl++; let sp = 0, n = 0; pil[sp++] = i0; lab[i0] = nl;
@@ -344,9 +393,10 @@ function chaveFundo() {
     }
     if (n > nMelhor) { nMelhor = n; melhor = nl; }
   }
-  if (!melhor || nMelhor < 0.01 * W * H) return null;
+  chaveFundo.info.nMelhor = nMelhor;
+  if (!melhor || nMelhor < 0.005 * W * H) return null;
   const out = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) out[i] = lab[i] === melhor ? 1 : 0;
-  return { dados: out, W, H, fundo: fr };
+  return { dados: out, W, H, fundo: gr[0].mu.map(Math.round) };
 }
 function esboco() {
   if (!mascara) { $("cartaoEsboco").hidden = true; return; }
@@ -409,7 +459,7 @@ $("baixaDxf").addEventListener("click", () => {
   baixa("esboco.dxf", d + "0\nENDSEC\n0\nEOF\n", "application/dxf");
 });
 
-window.__seg = { get esb() { return esb; }, get pts() { return pts; }, get mascara() { return mascara; }, get pronto() { return !!emb; }, clica: (x, y) => { pts.push({ x, y, v: 1 }); return recorta(); } };
+window.__seg = { chaveFundo, get esb() { return esb; }, get pts() { return pts; }, get mascara() { return mascara; }, get pronto() { return !!emb; }, clica: (x, y) => { pts.push({ x, y, v: 1 }); return recorta(); } };
 </script>
 </body>
 </html>
