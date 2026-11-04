@@ -40,7 +40,9 @@
 <div class="card">
   <b>2 · Foto da peça</b>
   <div class="linha">
-    <label class="bt" for="arq">Tirar / escolher foto</label>
+    <label class="bt" for="cam">Fotografar a peça</label>
+    <input id="cam" type="file" accept="image/*" capture="environment">
+    <label class="bt sec" for="arq">Escolher da galeria</label>
     <input id="arq" type="file" accept="image/*">
   </div>
   <div id="palco" style="margin-top:8px" hidden>
@@ -55,12 +57,24 @@
   <div class="peq" id="stFoto">Carregue o modelo e escolha uma foto. Depois toque na peça.</div>
 </div>
 
+<div class="card" id="cartaoEsboco" hidden>
+  <b>3 · Esboço 2D</b>
+  <canvas id="papel" style="width:100%;background:#fff;border:1px solid var(--borda);border-radius:6px;margin-top:8px"></canvas>
+  <div class="linha" style="align-items:center">
+    <select id="eixoEsc"><option value="L">Largura</option><option value="A">Altura</option></select>
+    <input id="medEsc" type="number" inputmode="decimal" placeholder="mm" style="width:90px;font:inherit;padding:8px;border:1px solid var(--borda);border-radius:8px">
+    <button id="aplEsc" class="sec">Aplicar escala</button>
+  </div>
+  <div class="linha"><button id="baixaSvg" class="sec">Baixar SVG</button><button id="baixaDxf" class="sec">Baixar DXF</button></div>
+  <div class="peq" id="stEsboco"></div>
+</div>
+
 <script type="module">
 import { SamModel, AutoProcessor, RawImage, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
 const $ = (id) => document.getElementById(id);
 const MODELO = "Xenova/slimsam-77-uniform";
 const LADO = 1024; // maior lado da foto enviada ao modelo
-let gpuAtivo = false, modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
+let viaModelo = false, gpuAtivo = false, modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
 
 env.allowLocalModels = false;
 env.useBrowserCache = true; // guarda o modelo no celular (Cache API): da segunda vez não precisa de internet
@@ -97,7 +111,7 @@ $("carrega").addEventListener("click", async () => {
   } catch (e) { modelo = null; $("carrega").disabled = false; msg("stModelo", "Não consegui carregar o modelo: " + (e && e.message || e), true); }
 });
 
-$("arq").addEventListener("change", (ev) => { const f = ev.target.files[0]; if (f) abreFoto(URL.createObjectURL(f)); });
+for (const i of ["arq", "cam"]) $(i).addEventListener("change", (ev) => { const f = ev.target.files[0]; if (f) abreFoto(URL.createObjectURL(f)); });
 const teste = new URLSearchParams(location.search).get("img");
 if (teste) abreFoto(teste);
 
@@ -109,7 +123,10 @@ function abreFoto(url) {
     for (const c of [$("foto"), $("sobre")]) { c.width = w; c.height = h; }
     $("foto").getContext("2d").drawImage(im, 0, 0, w, h);
     imagem = $("foto"); pts = []; mascara = null; emb = null; $("palco").hidden = false; desenha();
-    if (modelo) await preparaFoto(); else msg("stFoto", "Foto pronta. Falta carregar o modelo.");
+    const ch = chaveFundo();
+    if (ch) { viaModelo = false; mascara = ch; desenha(); esboco(); msg("stFoto", "Fundo liso detectado (cor " + ch.fundo.map(Math.round).join(",") + "): peça separada sem IA e sem toque."); return; }
+    viaModelo = true;
+    if (modelo) await preparaFoto(); else msg("stFoto", "O fundo não é liso, então preciso do modelo de IA. Toque em Carregar modelo.");
   };
   im.onerror = () => msg("stFoto", "Não consegui abrir essa imagem.", true);
   im.src = url;
@@ -124,6 +141,10 @@ async function preparaFoto() {
     emb = { ...(await modelo.get_image_embeddings(ent)), ent, raw };
     msg("stFoto", "Foto analisada em " + ((performance.now() - t0) / 1000).toFixed(1) + " s. Toque na peça.");
     ["modo", "desfaz", "limpa"].forEach((i) => { $(i).disabled = false; });
+    const a = await achaPeca(); // automático: ninguém precisa tocar
+    if (a) { pts = [a.p]; mascara = { dados: a.dados, W: a.W, H: a.H }; desenha(); esboco(); msg("stFoto", "Peça achada sozinha (confiança " + (a.iou * 100).toFixed(0) + " %). Se errou, toque na peça para corrigir."); }
+    else msg("stFoto", "Não achei a peça sozinho. Toque nela.", true);
+    espera(false); return;
   } catch (e) {
     if (gpuAtivo) { // a placa de vídeo falhou na hora de analisar: volta para o processador e tenta de novo
       gpuAtivo = false; msg("stFoto", "A placa de vídeo falhou; trocando para o processador…");
@@ -146,19 +167,35 @@ $("modo").addEventListener("click", () => { dentro = !dentro; $("modo").textCont
 $("desfaz").addEventListener("click", async () => { pts.pop(); await recorta(); });
 $("limpa").addEventListener("click", () => { pts = []; mascara = null; desenha(); msg("stFoto", "Toque na peça."); });
 
+async function segmenta(lista) { // uma passada do decodificador: devolve a melhor das 3 máscaras do modelo
+  const ent = await proc(emb.raw, { input_points: [lista.map((p) => [p.x, p.y])], input_labels: [lista.map((p) => p.v)] });
+  const saida = await modelo({ image_embeddings: emb.image_embeddings, image_positional_embeddings: emb.image_positional_embeddings, input_points: ent.input_points, input_labels: ent.input_labels });
+  const ms = await proc.post_process_masks(saida.pred_masks, ent.original_sizes, ent.reshaped_input_sizes);
+  const iou = saida.iou_scores.data; let m = 0; for (let i = 1; i < iou.length; i++) if (iou[i] > iou[m]) m = i;
+  const t = ms[0], H = t.dims[2], W = t.dims[3];
+  return { dados: t.data.slice(m * H * W, (m + 1) * H * W), W, H, iou: iou[m] };
+}
+async function achaPeca() { // automático: testa pontos em volta do centro e fica com a maior mancha que não encosta na borda (fundo)
+  const w = imagem.width, h = imagem.height, cand = [[0.5, 0.5], [0.35, 0.5], [0.65, 0.5], [0.5, 0.35], [0.5, 0.65]];
+  let melhor = null;
+  for (const [fx, fy] of cand) {
+    const p = { x: fx * w, y: fy * h, v: 1 }, r = await segmenta([p]);
+    let n = 0, borda = false; const { dados, W, H } = r;
+    for (let i = 0; i < dados.length; i++) if (dados[i]) { n++; const x = i % W, y = (i / W) | 0; if (x === 0 || y === 0 || x === W - 1 || y === H - 1) borda = true; }
+    if (borda || r.iou < 0.7 || n < 0.01 * dados.length) continue;
+    if (!melhor || n > melhor.n) melhor = { ...r, n, p };
+  }
+  return melhor;
+}
 async function recorta() {
   if (!pts.length) { mascara = null; desenha(); return; }
   espera(true);
   try {
     const t0 = performance.now();
-    const ent = await proc(emb.raw, { input_points: [pts.map((p) => [p.x, p.y])], input_labels: [pts.map((p) => p.v)] });
-    const saida = await modelo({ image_embeddings: emb.image_embeddings, image_positional_embeddings: emb.image_positional_embeddings, input_points: ent.input_points, input_labels: ent.input_labels });
-    const ms = await proc.post_process_masks(saida.pred_masks, ent.original_sizes, ent.reshaped_input_sizes);
-    const iou = saida.iou_scores.data; let m = 0; for (let i = 1; i < iou.length; i++) if (iou[i] > iou[m]) m = i;
-    const t = ms[0], H = t.dims[2], W = t.dims[3], dados = t.data.subarray(m * H * W, (m + 1) * H * W);
-    mascara = { dados, W, H };
+    const r = await segmenta(pts), { dados } = r, iou = [r.iou], m = 0;
+    mascara = { dados, W: r.W, H: r.H };
     let n = 0; for (let i = 0; i < dados.length; i++) if (dados[i]) n++;
-    desenha();
+    desenha(); esboco();
     msg("stFoto", "Peça = " + (100 * n / dados.length).toFixed(1) + " % da foto · confiança " + (iou[m] * 100).toFixed(0) + " % · " + (performance.now() - t0).toFixed(0) + " ms · " + pts.length + " toque(s). Toque de novo para corrigir.");
   } catch (e) { msg("stFoto", "Erro no recorte: " + (e && e.message || e), true); }
   espera(false);
@@ -181,7 +218,159 @@ function desenha() {
   const r = Math.max(5, c.width / 90);
   for (const p of pts) { g.beginPath(); g.arc(p.x, p.y, r, 0, 7); g.fillStyle = p.v ? "#2ecc71" : "#e74c3c"; g.fill(); g.lineWidth = 2; g.strokeStyle = "#fff"; g.stroke(); }
 }
-window.__seg = { get pts() { return pts; }, get mascara() { return mascara; }, get pronto() { return !!emb; }, clica: (x, y) => { pts.push({ x, y, v: 1 }); return recorta(); } };
+
+// ── esboço 2D: contorno e furos da máscara viram desenho vetorial ──
+let esb = null, escala = null; // escala = mm por pixel da foto
+function lacos(m) { // arestas entre pixel dentro e fora, ligadas em laços (externo horário, furos anti-horários)
+  const { dados, W, H } = m, K = W + 1, sai = new Map(), v = (x, y) => y * K + x;
+  const fora = (x, y) => x < 0 || y < 0 || x >= W || y >= H || !dados[y * W + x];
+  const add = (a, b) => { const l = sai.get(a); if (l) l.push(b); else sai.set(a, [b]); };
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (!dados[y * W + x]) continue;
+    if (fora(x, y - 1)) add(v(x, y), v(x + 1, y));
+    if (fora(x + 1, y)) add(v(x + 1, y), v(x + 1, y + 1));
+    if (fora(x, y + 1)) add(v(x + 1, y + 1), v(x, y + 1));
+    if (fora(x - 1, y)) add(v(x, y + 1), v(x, y));
+  }
+  const res = [];
+  for (const [ini, l0] of sai) {
+    while (l0.length) {
+      const laco = [ini]; let at = l0.pop();
+      while (at !== ini) { laco.push(at); const l = sai.get(at); if (!l || !l.length) break; at = l.pop(); }
+      if (laco.length > 8) res.push(laco.map((k) => [k % K, Math.floor(k / K)]));
+    }
+  }
+  return res;
+}
+const areaS = (p) => { let a = 0; for (let i = 0; i < p.length; i++) { const q = p[(i + 1) % p.length]; a += p[i][0] * q[1] - q[0] * p[i][1]; } return a / 2; };
+function dp(p, eps) { // Douglas-Peucker em laço fechado: parte dos dois pontos mais distantes
+  let b = 0, d0 = -1; for (let i = 1; i < p.length; i++) { const d = (p[i][0] - p[0][0]) ** 2 + (p[i][1] - p[0][1]) ** 2; if (d > d0) { d0 = d; b = i; } }
+  const seg = (i, j) => {
+    if (j - i < 2) return [p[i]];
+    const [x1, y1] = p[i], [x2, y2] = p[j % p.length], dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy) || 1; let m = -1, k = -1;
+    for (let t = i + 1; t < j; t++) { const d = Math.abs(dy * (p[t][0] - x1) - dx * (p[t][1] - y1)) / L; if (d > m) { m = d; k = t; } }
+    return m > eps ? [...seg(i, k), ...seg(k, j)] : [p[i]];
+  };
+  return [...seg(0, b), ...seg(b, p.length)];
+}
+function circulo(p) { // laço é um círculo? devolve {cx, cy, r} ou null
+  let cx = 0, cy = 0; for (const q of p) { cx += q[0]; cy += q[1]; } cx /= p.length; cy /= p.length;
+  const rs = p.map((q) => Math.hypot(q[0] - cx, q[1] - cy)), r = rs.reduce((a, b) => a + b) / rs.length;
+  const dv = Math.sqrt(rs.reduce((a, b) => a + (b - r) ** 2, 0) / rs.length);
+  return dv / r < 0.05 && Math.abs(areaS(p)) / (Math.PI * r * r) > 0.9 ? { cx, cy, r } : null;
+}
+function furosEscuros(m) { // o modelo costuma incluir o interior escuro do furo na peça: acha manchas bem mais escuras que o resto, no miolo da peça
+  const { dados, W, H } = m, g = $("foto").getContext("2d").getImageData(0, 0, W, H).data, L = new Float32Array(W * H), amostra = [];
+  for (let i = 0; i < W * H; i++) { L[i] = 0.299 * g[4 * i] + 0.587 * g[4 * i + 1] + 0.114 * g[4 * i + 2]; if (dados[i]) amostra.push(L[i]); }
+  if (amostra.length < 100) return [];
+  amostra.sort((a, b) => a - b); const lim = amostra[amostra.length >> 1] * 0.5; // metade da luminosidade típica da peça
+  // distância ao fora da peça (aprox., por erosão): furo de verdade fica longe da borda externa
+  const perto = new Uint8Array(W * H), R = Math.max(3, Math.round(0.006 * Math.max(W, H)));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (!dados[y * W + x]) for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < W && yy < H) perto[yy * W + xx] = 1; }
+  const esc = new Uint8Array(W * H), vis = new Uint8Array(W * H), res = [], total = amostra.length;
+  for (let i = 0; i < W * H; i++) esc[i] = dados[i] && L[i] < lim ? 1 : 0;
+  for (let i0 = 0; i0 < W * H; i0++) {
+    if (!esc[i0] || vis[i0]) continue;
+    const pilha = [i0], comp = []; let tocaBorda = false; vis[i0] = 1;
+    while (pilha.length) {
+      const i = pilha.pop(); comp.push(i); if (perto[i]) tocaBorda = true;
+      const x = i % W, y = (i / W) | 0;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && esc[j] && !vis[j]) { vis[j] = 1; pilha.push(j); }
+    }
+    if (tocaBorda || comp.length < 0.002 * total || comp.length > 0.3 * total) continue;
+    const d = new Uint8Array(W * H); for (const i of comp) d[i] = 1;
+    res.push({ dados: d, W, H });
+  }
+  return res;
+}
+// ── caminho principal: fundo liso (preto, azul, qualquer cor uniforme) separa a peça sozinho, sem IA ──
+function chaveFundo() {
+  const c = $("foto"), W = c.width, H = c.height, d = c.getContext("2d").getImageData(0, 0, W, H).data, B = Math.max(4, Math.round(0.03 * Math.min(W, H)));
+  const borda = (x, y) => x < B || y < B || x >= W - B || y >= H - B;
+  let r = [], g = [], b = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) { const i = 4 * (y * W + x); r.push(d[i]); g.push(d[i + 1]); b.push(d[i + 2]); }
+  const med = (a) => { a = a.slice().sort((p, q) => p - q); return a[a.length >> 1]; }, fr = [med(r), med(g), med(b)];
+  const dist = new Float32Array(W * H), db = [];
+  for (let i = 0; i < W * H; i++) { dist[i] = Math.hypot(d[4 * i] - fr[0], d[4 * i + 1] - fr[1], d[4 * i + 2] - fr[2]); }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) db.push(dist[y * W + x]);
+  db.sort((p, q) => p - q); const p95 = db[Math.floor(db.length * 0.95)];
+  if (p95 > 45) return null; // a borda não é um fundo liso: cai para o modelo de IA
+  const T = Math.max(40, 3 * p95), dados = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) dados[i] = dist[i] > T ? 1 : 0;
+  // fica só a maior mancha (a peça): tira poeira e respingos do fundo
+  const vis = new Uint8Array(W * H); let melhor = null;
+  for (let i0 = 0; i0 < W * H; i0++) {
+    if (!dados[i0] || vis[i0]) continue;
+    const pil = [i0], comp = []; vis[i0] = 1;
+    while (pil.length) { const i = pil.pop(); comp.push(i); const x = i % W, y = (i / W) | 0; for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && dados[j] && !vis[j]) { vis[j] = 1; pil.push(j); } }
+    if (!melhor || comp.length > melhor.length) melhor = comp;
+  }
+  if (!melhor || melhor.length < 0.01 * W * H) return null;
+  const out = new Uint8Array(W * H); for (const i of melhor) out[i] = 1;
+  return { dados: out, W, H, fundo: fr };
+}
+function esboco() {
+  if (!mascara) { $("cartaoEsboco").hidden = true; return; }
+  const ls = lacos(mascara).map((p) => ({ p, a: Math.abs(areaS(p)) })).sort((x, y) => y.a - x.a);
+  if (!ls.length) return;
+  const ext = ls[0], mini = ext.a * 0.002; // ignora furos menores que 0,2 % da peça
+  const xs = ext.p.map((q) => q[0]), ys = ext.p.map((q) => q[1]);
+  const caixa = { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  const eps = Math.max(1.5, 0.006 * Math.max(caixa.x1 - caixa.x0, caixa.y1 - caixa.y0));
+  const forma = (l) => { const c = circulo(l.p); return c ? { tipo: "circ", ...c } : { tipo: "poli", pts: dp(l.p, eps) }; };
+  const escuros = (viaModelo ? furosEscuros(mascara) : []).map((m2) => lacos(m2).map((p) => ({ p, a: Math.abs(areaS(p)) })).sort((x, y) => y.a - x.a)[0]).filter(Boolean);
+  esb = { caixa, ext: forma(ext), furos: [...ls.slice(1).filter((l) => l.a > mini), ...escuros].map(forma) };
+  $("cartaoEsboco").hidden = false; desenhaEsboco();
+}
+function desenhaEsboco() {
+  if (!esb) return;
+  const c = $("papel"), g = c.getContext("2d"), { caixa: b } = esb, bw = b.x1 - b.x0, bh = b.y1 - b.y0, M = 70, W = 900;
+  const k = (W - 2 * M) / bw; c.width = W; c.height = Math.round(bh * k + 2 * M);
+  g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  const X = (x) => M + (x - b.x0) * k, Y = (y) => M + (y - b.y0) * k, mm = (px) => (escala ? px * escala : px), un = escala ? " mm" : " px";
+  const txt = (n) => (Math.round(n * 10) / 10).toString().replace(".", ",");
+  g.strokeStyle = "#1c2b36"; g.lineWidth = 2.2; g.lineJoin = "round";
+  const traca = (f) => {
+    g.beginPath();
+    if (f.tipo === "circ") g.arc(X(f.cx), Y(f.cy), f.r * k, 0, 7);
+    else { f.pts.forEach((q, i) => (i ? g.lineTo(X(q[0]), Y(q[1])) : g.moveTo(X(q[0]), Y(q[1])))); g.closePath(); }
+    g.stroke();
+  };
+  traca(esb.ext); esb.furos.forEach(traca);
+  g.strokeStyle = "#1a88a8"; g.fillStyle = "#1a88a8"; g.lineWidth = 1; g.textAlign = "center";
+  for (const f of esb.furos) if (f.tipo === "circ") { // centro e diâmetro
+    g.beginPath(); g.moveTo(X(f.cx) - 8, Y(f.cy)); g.lineTo(X(f.cx) + 8, Y(f.cy)); g.moveTo(X(f.cx), Y(f.cy) - 8); g.lineTo(X(f.cx), Y(f.cy) + 8); g.stroke();
+    g.font = "18px system-ui"; g.fillText("⌀" + txt(mm(2 * f.r)), X(f.cx), Y(f.cy) + f.r * k + 20);
+  }
+  g.font = "bold 22px system-ui"; // cotas gerais
+  g.beginPath(); g.moveTo(X(b.x0), c.height - 28); g.lineTo(X(b.x1), c.height - 28); g.stroke(); g.fillText(txt(mm(bw)) + un, (X(b.x0) + X(b.x1)) / 2, c.height - 34);
+  g.save(); g.translate(28, (Y(b.y0) + Y(b.y1)) / 2); g.rotate(-Math.PI / 2); g.beginPath(); g.moveTo(-bh * k / 2, 0); g.lineTo(bh * k / 2, 0); g.stroke(); g.fillText(txt(mm(bh)) + un, 0, -6); g.restore();
+  msg("stEsboco", esb.furos.length + " furo(s)/vazado(s) encontrado(s). " + (escala ? "Escala aplicada." : "Sem escala: valores em pixels da foto. Digite uma medida real acima."));
+}
+$("aplEsc").addEventListener("click", () => {
+  const v = parseFloat($("medEsc").value.replace(",", ".")); if (!esb || !(v > 0)) return msg("stEsboco", "Digite uma medida em mm.", true);
+  const { caixa: b } = esb; escala = v / ($("eixoEsc").value === "L" ? b.x1 - b.x0 : b.y1 - b.y0); desenhaEsboco();
+});
+const baixa = (nome, texto, tipo) => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([texto], { type: tipo })); a.download = nome; a.click(); };
+function entidades() { // em mm (ou px) com Y para cima
+  if (!esb) return []; const e = escala || 1, { caixa: b } = esb, T = (q) => [(q[0] - b.x0) * e, (b.y1 - q[1]) * e], out = [];
+  for (const f of [esb.ext, ...esb.furos]) {
+    if (f.tipo === "circ") { const [x, y] = T([f.cx, f.cy]); out.push({ c: [x, y, f.r * e] }); }
+    else for (let i = 0; i < f.pts.length; i++) out.push({ l: [...T(f.pts[i]), ...T(f.pts[(i + 1) % f.pts.length])] });
+  }
+  return out;
+}
+$("baixaSvg").addEventListener("click", () => {
+  const es = entidades(), { caixa: b } = esb, e = escala || 1, w = (b.x1 - b.x0) * e, h = (b.y1 - b.y0) * e, f = (n) => n.toFixed(2);
+  baixa("esboco.svg", `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-5 -5 ${f(w + 10)} ${f(h + 10)}" width="${f(w + 10)}${escala ? "mm" : ""}" height="${f(h + 10)}${escala ? "mm" : ""}"><g fill="none" stroke="#000" stroke-width="${f(Math.max(w, h) / 400)}" transform="translate(0 ${f(h)}) scale(1 -1)">${es.map((s) => s.c ? `<circle cx="${f(s.c[0])}" cy="${f(s.c[1])}" r="${f(s.c[2])}"/>` : `<line x1="${f(s.l[0])}" y1="${f(s.l[1])}" x2="${f(s.l[2])}" y2="${f(s.l[3])}"/>`).join("")}</g></svg>`, "image/svg+xml");
+});
+$("baixaDxf").addEventListener("click", () => {
+  const f = (n) => n.toFixed(4); let d = "0\nSECTION\n2\nENTITIES\n";
+  for (const s of entidades()) d += s.c ? `0\nCIRCLE\n8\n0\n10\n${f(s.c[0])}\n20\n${f(s.c[1])}\n30\n0\n40\n${f(s.c[2])}\n` : `0\nLINE\n8\n0\n10\n${f(s.l[0])}\n20\n${f(s.l[1])}\n30\n0\n11\n${f(s.l[2])}\n21\n${f(s.l[3])}\n31\n0\n`;
+  baixa("esboco.dxf", d + "0\nENDSEC\n0\nEOF\n", "application/dxf");
+});
+
+window.__seg = { get esb() { return esb; }, get pts() { return pts; }, get mascara() { return mascara; }, get pronto() { return !!emb; }, clica: (x, y) => { pts.push({ x, y, v: 1 }); return recorta(); } };
 </script>
 </body>
 </html>
