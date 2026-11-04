@@ -24,6 +24,12 @@
   #sobre { position: absolute; inset: 0; width: 100%; height: 100%; }
   #palco.espera::after { content: "Calculando…"; position: absolute; left: 8px; top: 8px; background: #0d161ccc; color: #fff; padding: 3px 9px; border-radius: 10px; font-size: 13px; }
   input[type=file] { display: none; }
+  #camTela { position: fixed; inset: 0; z-index: 50; background: #0d161c; display: flex; flex-direction: column; }
+  #camTela[hidden] { display: none; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #camBase { position: relative; z-index: 2; margin-top: auto; padding: 12px 14px max(18px, env(safe-area-inset-bottom)); display: flex; align-items: center; justify-content: space-between; background: linear-gradient(#0d161c00, #0d161ccc 40%); }
+  #camBase .sec { min-width: 92px; }
+  #camFoto { width: 70px; height: 70px; border-radius: 50%; background: #fff; border: 5px solid #ffffff99; padding: 0; background-clip: content-box; }
 </style>
 </head>
 <body>
@@ -40,8 +46,7 @@
 <div class="card">
   <b>2 · Foto da peça</b>
   <div class="linha">
-    <label class="bt" for="cam">Fotografar a peça</label>
-    <input id="cam" type="file" accept="image/*" capture="environment">
+    <button id="camAbre">Fotografar a peça</button>
     <label class="bt sec" for="arq">Escolher da galeria</label>
     <input id="arq" type="file" accept="image/*">
   </div>
@@ -55,6 +60,11 @@
     <button id="limpa" class="sec" disabled>Limpar</button>
   </div>
   <div class="peq" id="stFoto">Carregue o modelo e escolha uma foto. Depois toque na peça.</div>
+</div>
+
+<div id="camTela" hidden>
+  <video id="video" playsinline muted></video>
+  <div id="camBase"><button id="camFecha" class="sec">Fechar</button><button id="camFoto" aria-label="Tirar foto"></button><span style="width:92px"></span></div>
 </div>
 
 <div class="card" id="cartaoEsboco" hidden>
@@ -111,15 +121,35 @@ $("carrega").addEventListener("click", async () => {
   } catch (e) { modelo = null; $("carrega").disabled = false; msg("stModelo", "Não consegui carregar o modelo: " + (e && e.message || e), true); }
 });
 
-for (const i of ["arq", "cam"]) $(i).addEventListener("change", (ev) => { const f = ev.target.files[0]; if (f) abreFoto(URL.createObjectURL(f)); });
+$("arq").addEventListener("change", async (ev) => {
+  const f = ev.target.files[0]; if (!f) return;
+  try { // lê já reduzido: foto de 12 MP inteira estoura a memória do celular
+    let bm; try { bm = await createImageBitmap(f, { resizeWidth: LADO, resizeQuality: "medium", imageOrientation: "from-image" }); } catch (e) { bm = await createImageBitmap(f); }
+    usaImagem(bm, bm.width, bm.height); bm.close && bm.close();
+  } catch (e) { msg("stFoto", "Não consegui abrir essa imagem: " + (e && e.message || e), true); }
+});
+let fluxo = null;
+$("camAbre").addEventListener("click", async () => {
+  try { fluxo = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }); }
+  catch (e) { msg("stFoto", "Não consegui abrir a câmera: " + (e && e.message || e) + ". Use \"Escolher da galeria\".", true); return; }
+  const v = $("video"); v.srcObject = fluxo; await v.play(); $("camTela").hidden = false;
+});
+const fechaCam = () => { if (fluxo) fluxo.getTracks().forEach((t) => t.stop()); fluxo = null; $("video").srcObject = null; $("camTela").hidden = true; };
+$("camFecha").addEventListener("click", fechaCam);
+$("camFoto").addEventListener("click", () => { const v = $("video"); if (!v.videoWidth) return; usaImagem(v, v.videoWidth, v.videoHeight); fechaCam(); });
 const teste = new URLSearchParams(location.search).get("img");
 if (teste) abreFoto(teste);
 
 function abreFoto(url) {
   const im = new Image();
-  im.onload = async () => {
-    const k = Math.min(1, LADO / Math.max(im.naturalWidth, im.naturalHeight));
-    const w = Math.round(im.naturalWidth * k), h = Math.round(im.naturalHeight * k);
+  im.onload = () => usaImagem(im, im.naturalWidth, im.naturalHeight);
+  im.onerror = () => msg("stFoto", "Não consegui abrir essa imagem.", true);
+  im.src = url;
+}
+async function usaImagem(im, iw, ih) {
+  {
+    const k = Math.min(1, LADO / Math.max(iw, ih));
+    const w = Math.round(iw * k), h = Math.round(ih * k);
     for (const c of [$("foto"), $("sobre")]) { c.width = w; c.height = h; }
     $("foto").getContext("2d").drawImage(im, 0, 0, w, h);
     imagem = $("foto"); pts = []; mascara = null; emb = null; $("palco").hidden = false; desenha();
@@ -127,9 +157,7 @@ function abreFoto(url) {
     if (ch) { viaModelo = false; mascara = ch; desenha(); esboco(); msg("stFoto", "Fundo liso detectado (cor " + ch.fundo.map(Math.round).join(",") + "): peça separada sem IA e sem toque."); return; }
     viaModelo = true;
     if (modelo) await preparaFoto(); else msg("stFoto", "O fundo não é liso, então preciso do modelo de IA. Toque em Carregar modelo.");
-  };
-  im.onerror = () => msg("stFoto", "Não consegui abrir essa imagem.", true);
-  im.src = url;
+  }
 }
 
 async function preparaFoto() {
