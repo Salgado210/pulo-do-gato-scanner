@@ -38,12 +38,28 @@
   th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--borda); }
   th { color: var(--mudo); font-weight: 600; font-family: 'Segoe UI', sans-serif; }
   .peq { font-size: 12px; color: var(--mudo); }
-  #video { width: 100%; max-height: 240px; background: #1a2a35; border-radius: 8px; display: none; object-fit: contain; }
-  #video.on { display: block; }
-  #tiras { display: flex; gap: 4px; overflow-x: auto; }
-  #tiras img { height: 44px; border-radius: 4px; border: 1px solid var(--borda); flex: none; }
-  #anel path { fill: #eef4f8; stroke: var(--borda2); stroke-width: 1; }
-  #anel path.cheio { fill: var(--acento); }
+  #fotos { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  #fotos div { aspect-ratio: 3 / 4; border: 1px dashed var(--borda2); border-radius: 6px; background: #eef4f8 center / cover no-repeat; font-size: 10px; color: var(--mudo); display: flex; align-items: flex-end; justify-content: center; padding: 2px; text-align: center; line-height: 1.1; }
+  #fotos div.tem { border-style: solid; border-color: var(--acento); color: #fff; text-shadow: 0 0 3px #000; }
+  #camTela { position: fixed; inset: 0; z-index: 50; background: #0d161c; display: flex; flex-direction: column; }
+  #camTela[hidden] { display: none; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #0d161c; }
+  #camTopo { position: relative; z-index: 2; padding: max(10px, env(safe-area-inset-top)) 14px 8px; background: linear-gradient(#0d161ccc, #0d161c00); color: #fff; display: flex; flex-direction: column; gap: 2px; }
+  #camTopo b { font-size: 17px; } #camTopo span { font-size: 13px; opacity: .85; }
+  #camGuia { position: absolute; inset: 18% 12%; border: 2px dashed #ffffff88; border-radius: 12px; pointer-events: none; z-index: 1; }
+  #camGuia::before, #camGuia::after { content: ""; position: absolute; background: #ffffff66; }
+  #camGuia::before { left: 50%; top: 0; bottom: 0; width: 1px; } #camGuia::after { top: 50%; left: 0; right: 0; height: 1px; }
+  #camNivel { position: absolute; z-index: 2; left: 50%; transform: translateX(-50%); top: 84px; padding: 4px 12px; border-radius: 14px; font-size: 13px; background: #0d161caa; color: #fff; }
+  #camNivel[hidden] { display: none; }
+  #camNivel.ok { background: #1a88a8; }
+  #camBase { position: relative; z-index: 2; margin-top: auto; padding: 8px 14px max(14px, env(safe-area-inset-bottom)); background: linear-gradient(#0d161c00, #0d161ccc 35%); display: flex; flex-direction: column; gap: 10px; }
+  #camSlots { display: flex; gap: 6px; justify-content: center; }
+  #camSlots button { width: 52px; height: 64px; padding: 0; border-radius: 8px; border: 2px solid #ffffff55; background: #1a2a35 center / cover no-repeat; color: #fff; font-size: 10px; line-height: 1.1; display: flex; align-items: flex-end; justify-content: center; }
+  #camSlots button.tem { border-color: var(--acento); } #camSlots button.atual { border-color: #fff; box-shadow: 0 0 0 2px var(--acento); }
+  #camBotoes { display: flex; align-items: center; justify-content: space-between; }
+  #camBotoes .sec { min-width: 92px; }
+  #camFoto { width: 68px; height: 68px; border-radius: 50%; background: #fff; border: 5px solid #ffffff99; padding: 0; background-clip: content-box; }
+  #camFoto:active { transform: scale(.92); }
 </style>
 </head>
 <body>
@@ -51,19 +67,25 @@
   <h1>Scanner — malha para vistas e diâmetros</h1>
 
   <div class="card">
-    <h2>0 · Câmera</h2>
-    <video id="video" playsinline muted></video>
+    <h2>0 · Câmera (5 fotos guiadas)</h2>
+    <div id="fotos"></div>
     <div class="linha">
       <button id="camAbre">Abrir câmera</button>
-      <button id="camGrava" class="sec" disabled>Gravar quadros</button>
       <button id="camLimpa" class="sec" disabled>Limpar</button>
     </div>
-    <div class="linha">
-      <svg id="anel" viewBox="-60 -60 120 120" width="96" height="96"></svg>
-      <div class="peq" id="camInfo">Câmera fechada. Ponha a peça sobre uma mesa fosca, com luz difusa, e dê a volta devagar mantendo-a no centro da imagem.</div>
+    <div class="peq" id="camInfo">Tire 5 fotos da peça: frontal, lateral direita, verso, lateral esquerda e superior. Use mesa fosca, luz difusa e a peça inteira no quadro.</div>
+    <button id="camGera" disabled>Gerar 3D das fotos</button>
+  </div>
+
+  <div id="camTela" hidden>
+    <video id="video" playsinline muted></video>
+    <div id="camTopo"><b id="camTitulo"></b><span id="camDica"></span></div>
+    <div id="camGuia"></div>
+    <div id="camNivel"></div>
+    <div id="camBase">
+      <div id="camSlots"></div>
+      <div id="camBotoes"><button id="camFecha" class="sec">Fechar</button><button id="camFoto" aria-label="Tirar foto"></button><button id="camOk" class="sec" disabled>Concluir</button></div>
     </div>
-    <div id="tiras"></div>
-    <button id="camGera" disabled>Gerar 3D dos quadros</button>
   </div>
 
   <div class="card">
@@ -158,78 +180,93 @@
   cv.addEventListener("wheel", (e) => { e.preventDefault(); dist *= e.deltaY > 0 ? 1.1 : 0.9; desenha3D(); }, { passive: false });
   addEventListener("resize", () => malha && desenha3D());
 
-  // ── câmera: guarda os quadros nítidos e diferentes entre si, anota para onde o aparelho apontava ──
-  const N_SETORES = 24, MAX_QUADROS = 150, cap = { fluxo: null, quadros: [], borrados: 0, gravando: false, ant: null, setores: new Array(N_SETORES).fill(0), ori: null, nitidez: [], timer: 0, ocupado: false };
+  // ── câmera em TELA CHEIA: 5 fotos guiadas, cada uma de um lado da peça ──
+  const FOTOS = [
+    { id: "frontal", nome: "Frontal", dica: "De frente para a peça, câmera na altura do meio dela.", lado: true },
+    { id: "direita", nome: "Lateral direita", dica: "Câmera do lado DIREITO da peça (a peça vista de frente fica à sua esquerda).", lado: true },
+    { id: "verso", nome: "Verso", dica: "Do lado oposto ao da frente, câmera na altura do meio.", lado: true },
+    { id: "esquerda", nome: "Lateral esquerda", dica: "Câmera do lado ESQUERDO da peça, na altura do meio.", lado: true },
+    { id: "superior", nome: "Superior", dica: "Câmera por cima, apontada para baixo, no centro da peça.", lado: false },
+  ];
+  const cap = { fluxo: null, fotos: {}, passo: 0, ori: null };
   const mini = document.createElement("canvas"), mctx = mini.getContext("2d", { willReadFrequently: true });
-  function desenhaAnel() {
-    const r0 = 22, r1 = 52, p = [];
-    for (let i = 0; i < N_SETORES; i++) {
-      const a0 = (i / N_SETORES) * 2 * Math.PI - Math.PI / 2, a1 = ((i + 1) / N_SETORES) * 2 * Math.PI - Math.PI / 2, g = 0.02;
-      const P = (r, a) => (r * Math.cos(a)).toFixed(2) + " " + (r * Math.sin(a)).toFixed(2);
-      p.push(`<path class="${cap.setores[i] ? "cheio" : ""}" d="M ${P(r0, a0 + g)} L ${P(r1, a0 + g)} A ${r1} ${r1} 0 0 1 ${P(r1, a1 - g)} L ${P(r0, a1 - g)} A ${r0} ${r0} 0 0 0 ${P(r0, a0 + g)} Z"/>`);
-    }
-    $("anel").innerHTML = p.join("");
-  }
-  function infoCam() {
-    const cheios = cap.setores.filter(Boolean).length;
-    $("camInfo").textContent = cap.fluxo ? (cap.gravando ? "Gravando: " : "Câmera aberta: ") + cap.quadros.length + " quadros guardados, " + cap.borrados + " borrados descartados. Direções cobertas: " + cheios + " de " + N_SETORES + (cap.ori ? "." : " (sem sensor de giro: a cobertura não é medida).") : "Câmera fechada.";
-    $("camGera").disabled = cap.quadros.length < 20;
-  }
-  // nitidez = variância do Laplaciano na imagem reduzida; diferença = média do |quadro − quadro anterior|
-  function mede() {
+  const curto = (n) => n.replace("Lateral ", "Lat. ");
+  function nitidez() { // variância do Laplaciano da imagem reduzida: quanto maior, mais nítida
     const v = $("video"), w = 160, h = Math.max(1, Math.round(160 * v.videoHeight / v.videoWidth));
     mini.width = w; mini.height = h; mctx.drawImage(v, 0, 0, w, h);
     const d = mctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
     for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
     let s = 0, s2 = 0, n = 0;
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const l = 4 * g[y * w + x] - g[y * w + x - 1] - g[y * w + x + 1] - g[(y - 1) * w + x] - g[(y + 1) * w + x]; s += l; s2 += l * l; n++; }
-    const nit = s2 / n - (s / n) * (s / n);
-    let dif = 1;
-    if (cap.ant && cap.ant.length === g.length) { dif = 0; for (let i = 0; i < g.length; i++) dif += Math.abs(g[i] - cap.ant[i]); dif /= g.length * 255; }
-    return { g, nit, dif };
+    return s2 / n - (s / n) * (s / n);
   }
-  function passo() {
-    const v = $("video");
-    if (!cap.gravando || cap.ocupado || !v.videoWidth || cap.quadros.length >= MAX_QUADROS) { if (cap.quadros.length >= MAX_QUADROS) camGrava(false); return; }
-    const m = mede(), ref = Math.max(...cap.nitidez.slice(-30), m.nit);
-    cap.nitidez.push(m.nit);
-    if (m.nit < ref * 0.55) { cap.borrados++; infoCam(); return; } // quadro borrado
-    const ori = cap.ori ? { a: cap.ori.a, b: cap.ori.b, g: cap.ori.g } : null, u = cap.quadros[cap.quadros.length - 1];
-    const dAng = ori && u && u.ori ? Math.abs(((ori.a - u.ori.a + 540) % 360) - 180) : 0;
-    if (u && m.dif < 0.05 && dAng < 5) return; // quase igual ao último: não repete
-    cap.ocupado = true;
-    const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext("2d").drawImage(v, 0, 0);
-    c.toBlob((b) => {
-      cap.ocupado = false;
-      if (!b) return;
-      const q = { blob: b, t: Date.now(), ori, nitidez: m.nit, w: c.width, h: c.height };
-      cap.quadros.push(q); cap.ant = m.g;
-      if (ori) cap.setores[Math.floor(((ori.a % 360) + 360) % 360 / (360 / N_SETORES))]++;
-      const im = new Image(); im.src = URL.createObjectURL(b); $("tiras").appendChild(im); $("tiras").scrollLeft = 1e6;
-      desenhaAnel(); infoCam();
-    }, "image/jpeg", 0.9);
+  const feitas = () => FOTOS.filter((f) => cap.fotos[f.id]).length;
+  function atualizaCartao() {
+    $("fotos").innerHTML = FOTOS.map((f) => { const o = cap.fotos[f.id]; return `<div class="${o ? "tem" : ""}" style="${o ? "background-image:url(" + o.url + ")" : ""}">${curto(f.nome)}</div>`; }).join("");
+    const n = feitas();
+    $("camInfo").textContent = n === 5 ? "As 5 fotos estão prontas. Toque em Gerar 3D." : n + " de 5 fotos. Faltam: " + FOTOS.filter((f) => !cap.fotos[f.id]).map((f) => f.nome.toLowerCase()).join(", ") + ".";
+    $("camGera").disabled = n < 5; $("camLimpa").disabled = n === 0;
   }
-  function camGrava(liga) {
-    cap.gravando = liga; $("camGrava").textContent = liga ? "Parar de gravar" : "Gravar quadros";
-    clearInterval(cap.timer); if (liga) cap.timer = setInterval(passo, 200);
-    infoCam();
+  function atualizaTela() {
+    const f = FOTOS[cap.passo];
+    $("camTitulo").textContent = (cap.passo + 1) + "/5 · " + f.nome; $("camDica").textContent = f.dica;
+    $("camSlots").innerHTML = FOTOS.map((x, i) => { const o = cap.fotos[x.id]; return `<button data-i="${i}" class="${o ? "tem" : ""} ${i === cap.passo ? "atual" : ""}" style="${o ? "background-image:url(" + o.url + ")" : ""}">${curto(x.nome)}</button>`; }).join("");
+    $("camSlots").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { cap.passo = +b.dataset.i; atualizaTela(); }));
+    $("camOk").disabled = feitas() < 5;
+    atualizaNivel();
   }
-  async function camAbre() {
-    if (cap.fluxo) { cap.fluxo.getTracks().forEach((t) => t.stop()); cap.fluxo = null; camGrava(false); $("video").classList.remove("on"); $("camAbre").textContent = "Abrir câmera"; $("camGrava").disabled = true; infoCam(); return; }
+  // nível: nas vistas laterais o aparelho fica em pé (beta ≈ 90°); na superior, deitado apontando para baixo (beta ≈ 0°)
+  function atualizaNivel() {
+    const el = $("camNivel"), f = FOTOS[cap.passo];
+    if (!cap.ori || cap.ori.b == null) { el.hidden = true; return; }
+    el.hidden = false;
+    const alvo = f.lado ? 90 : 0, desvio = Math.abs(Math.abs(cap.ori.b) - alvo), ok = desvio < 8;
+    el.className = ok ? "ok" : ""; el.textContent = ok ? "Nivelado ✓" : (f.lado ? "Segure o celular em pé, reto" : "Aponte a câmera para baixo, reto") + " (" + Math.round(desvio) + "° fora)";
+  }
+  addEventListener("deviceorientation", (e) => { if (e.beta != null) { cap.ori = { a: e.alpha, b: e.beta, g: e.gamma }; if (!$("camTela").hidden) atualizaNivel(); } });
+  async function abreCamera() {
     try {
       if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission().catch(() => {});
       cap.fluxo = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
-      const v = $("video"); v.srcObject = cap.fluxo; await v.play(); v.classList.add("on");
-      $("camAbre").textContent = "Fechar câmera"; $("camGrava").disabled = false; $("camLimpa").disabled = false;
-      addEventListener("deviceorientation", (e) => { if (e.alpha != null) cap.ori = { a: e.alpha, b: e.beta, g: e.gamma }; });
-      infoCam();
-    } catch (e) { cap.fluxo = null; msg("Não consegui abrir a câmera: " + (e && e.message || e) + ". A câmera exige página em https (ou localhost) e a sua permissão.", true); }
+    } catch (e) { cap.fluxo = null; msg("Não consegui abrir a câmera: " + (e && e.message || e) + ". Ela exige página em https (ou localhost) e a sua permissão.", true); return; }
+    const v = $("video"); v.srcObject = cap.fluxo; await v.play();
+    $("camTela").hidden = false;
+    const proximo = FOTOS.findIndex((f) => !cap.fotos[f.id]); cap.passo = proximo < 0 ? 0 : proximo;
+    try { const r = $("camTela").requestFullscreen && $("camTela").requestFullscreen({ navigationUI: "hide" }); if (r && r.catch) r.catch(() => {}); } catch (e) {}
+    try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock("portrait").catch(() => {}); } catch (e) {}
+    atualizaTela();
   }
-  $("camAbre").addEventListener("click", camAbre);
-  $("camGrava").addEventListener("click", () => camGrava(!cap.gravando));
-  $("camLimpa").addEventListener("click", () => { cap.quadros = []; cap.borrados = 0; cap.ant = null; cap.nitidez = []; cap.setores.fill(0); $("tiras").innerHTML = ""; desenhaAnel(); infoCam(); });
-  $("camGera").addEventListener("click", () => msg("A reconstrução dos quadros em 3D ainda não foi feita: é o próximo passo. Os " + cap.quadros.length + " quadros já estão guardados na página.", true));
-  desenhaAnel();
+  function fechaCamera() {
+    if (cap.fluxo) cap.fluxo.getTracks().forEach((t) => t.stop());
+    cap.fluxo = null; $("video").srcObject = null; $("camTela").hidden = true;
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
+    atualizaCartao();
+  }
+  async function tira() {
+    const v = $("video"); if (!v.videoWidth) { $("camDica").textContent = "A câmera ainda está iniciando: toque de novo em um segundo."; return; }
+    // três quadros seguidos; fica o mais nítido (tira o tremor da mão)
+    let melhor = null;
+    for (let i = 0; i < 3; i++) {
+      const nit = nitidez();
+      if (!melhor || nit > melhor.nit) { const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext("2d").drawImage(v, 0, 0); melhor = { nit, c }; }
+      if (i < 2) await new Promise((r) => setTimeout(r, 90));
+    }
+    const b = await new Promise((r) => melhor.c.toBlob(r, "image/jpeg", 0.92));
+    if (!b) return;
+    const f = FOTOS[cap.passo], velha = cap.fotos[f.id]; if (velha) URL.revokeObjectURL(velha.url);
+    cap.fotos[f.id] = { blob: b, url: URL.createObjectURL(b), w: melhor.c.width, h: melhor.c.height, nit: melhor.nit, ori: cap.ori ? { ...cap.ori } : null, t: Date.now() };
+    $("camGuia").style.borderColor = "#1a88a8"; setTimeout(() => ($("camGuia").style.borderColor = ""), 250);
+    const prox = FOTOS.findIndex((x) => !cap.fotos[x.id]); if (prox >= 0) cap.passo = prox;
+    atualizaTela();
+    if (melhor.nit < 8) $("camDica").textContent = "Foto com pouca nitidez: se der, tire de novo (toque na miniatura).";
+  }
+  $("camAbre").addEventListener("click", abreCamera);
+  $("camFoto").addEventListener("click", tira);
+  $("camFecha").addEventListener("click", fechaCamera);
+  $("camOk").addEventListener("click", fechaCamera);
+  $("camLimpa").addEventListener("click", () => { Object.values(cap.fotos).forEach((o) => URL.revokeObjectURL(o.url)); cap.fotos = {}; atualizaCartao(); });
+  $("camGera").addEventListener("click", () => msg("A reconstrução das 5 fotos em 3D ainda não foi feita: é o próximo passo. As fotos já estão guardadas na página.", true));
+  atualizaCartao();
   window.__cap = cap; // só para a bancada no navegador
 
   // ── análise e telas ──
