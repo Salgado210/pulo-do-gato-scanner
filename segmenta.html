@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scanner · toque e recorte</title>
+<style>
+  :root { --fundo: #eaf0f4; --cartao: #fff; --borda: #c9d6df; --texto: #1c2b36; --mudo: #5d7282; --acento: #1a88a8; --erro: #b23a3a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fundo); color: var(--texto); font: 15px/1.35 system-ui, sans-serif; padding: 10px; max-width: 520px; margin-inline: auto; }
+  h1 { font-size: 17px; margin: 4px 0 8px; }
+  .card { background: var(--cartao); border: 1px solid var(--borda); border-radius: 10px; padding: 10px; margin-bottom: 10px; }
+  button, label.bt { font: inherit; padding: 9px 12px; border-radius: 8px; border: 1px solid var(--acento); background: var(--acento); color: #fff; cursor: pointer; display: inline-block; }
+  button.sec, label.bt.sec { background: #fff; color: var(--acento); }
+  button:disabled { opacity: .45; }
+  button.ativo { box-shadow: 0 0 0 2px var(--erro); border-color: var(--erro); background: var(--erro); color: #fff; }
+  .linha { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .peq { font-size: 13px; color: var(--mudo); margin-top: 6px; }
+  .peq.erro { color: var(--erro); }
+  #barra { height: 6px; background: #dbe6ee; border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  #barra i { display: block; height: 100%; width: 0; background: var(--acento); transition: width .2s; }
+  #palco { position: relative; width: 100%; background: #0d161c; border-radius: 8px; overflow: hidden; touch-action: manipulation; }
+  #palco canvas { display: block; width: 100%; height: auto; }
+  #sobre { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #palco.espera::after { content: "Calculando…"; position: absolute; left: 8px; top: 8px; background: #0d161ccc; color: #fff; padding: 3px 9px; border-radius: 10px; font-size: 13px; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<h1>Scanner · toque na peça e ela é recortada</h1>
+
+<div class="card">
+  <b>1 · Modelo</b>
+  <div class="peq">Modelo de IA (SlimSAM) que roda no próprio celular. Baixa uma vez e fica guardado; depois funciona sem internet.</div>
+  <div class="linha"><button id="carrega">Carregar modelo</button></div>
+  <div id="barra"><i></i></div>
+  <div class="peq" id="stModelo">Modelo ainda não carregado.</div>
+</div>
+
+<div class="card">
+  <b>2 · Foto da peça</b>
+  <div class="linha">
+    <label class="bt" for="arq">Tirar / escolher foto</label>
+    <input id="arq" type="file" accept="image/*">
+  </div>
+  <div id="palco" style="margin-top:8px" hidden>
+    <canvas id="foto"></canvas>
+    <canvas id="sobre"></canvas>
+  </div>
+  <div class="linha">
+    <button id="modo" class="sec" disabled>Toque = É a peça</button>
+    <button id="desfaz" class="sec" disabled>Desfazer</button>
+    <button id="limpa" class="sec" disabled>Limpar</button>
+  </div>
+  <div class="peq" id="stFoto">Carregue o modelo e escolha uma foto. Depois toque na peça.</div>
+</div>
+
+<script type="module">
+import { SamModel, AutoProcessor, RawImage, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
+const $ = (id) => document.getElementById(id);
+const MODELO = "Xenova/slimsam-77-uniform";
+const LADO = 1024; // maior lado da foto enviada ao modelo
+let modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
+
+env.allowLocalModels = false;
+env.useBrowserCache = true; // guarda o modelo no celular (Cache API): da segunda vez não precisa de internet
+
+const msg = (id, t, erro) => { const e = $(id); e.textContent = t; e.classList.toggle("erro", !!erro); };
+
+$("carrega").addEventListener("click", async () => {
+  if (modelo) return;
+  $("carrega").disabled = true;
+  const t0 = performance.now(), partes = {};
+  const progresso = (p) => {
+    if (p.status === "progress" && p.total) {
+      partes[p.file] = [p.loaded, p.total];
+      let a = 0, b = 0; for (const k in partes) { a += partes[k][0]; b += partes[k][1]; }
+      $("barra").firstElementChild.style.width = Math.min(100, 100 * a / b) + "%";
+      msg("stModelo", "Baixando o modelo: " + (a / 1048576).toFixed(0) + " de " + (b / 1048576).toFixed(0) + " MB");
+    }
+  };
+  try {
+    msg("stModelo", "Iniciando o download…");
+    [modelo, proc] = await Promise.all([
+      SamModel.from_pretrained(MODELO, { dtype: "q8", progress_callback: progresso }),
+      AutoProcessor.from_pretrained(MODELO, { progress_callback: progresso }),
+    ]);
+    $("barra").firstElementChild.style.width = "100%";
+    msg("stModelo", "Modelo pronto em " + ((performance.now() - t0) / 1000).toFixed(1) + " s.");
+    if (imagem) await preparaFoto();
+  } catch (e) { modelo = null; $("carrega").disabled = false; msg("stModelo", "Não consegui carregar o modelo: " + (e && e.message || e), true); }
+});
+
+$("arq").addEventListener("change", (ev) => { const f = ev.target.files[0]; if (f) abreFoto(URL.createObjectURL(f)); });
+const teste = new URLSearchParams(location.search).get("img");
+if (teste) abreFoto(teste);
+
+function abreFoto(url) {
+  const im = new Image();
+  im.onload = async () => {
+    const k = Math.min(1, LADO / Math.max(im.naturalWidth, im.naturalHeight));
+    const w = Math.round(im.naturalWidth * k), h = Math.round(im.naturalHeight * k);
+    for (const c of [$("foto"), $("sobre")]) { c.width = w; c.height = h; }
+    $("foto").getContext("2d").drawImage(im, 0, 0, w, h);
+    imagem = $("foto"); pts = []; mascara = null; emb = null; $("palco").hidden = false; desenha();
+    if (modelo) await preparaFoto(); else msg("stFoto", "Foto pronta. Falta carregar o modelo.");
+  };
+  im.onerror = () => msg("stFoto", "Não consegui abrir essa imagem.", true);
+  im.src = url;
+}
+
+async function preparaFoto() {
+  espera(true); msg("stFoto", "Analisando a foto (só na primeira vez de cada foto)…");
+  try {
+    const t0 = performance.now();
+    const raw = await RawImage.fromCanvas(imagem);
+    const ent = await proc(raw);
+    emb = { ...(await modelo.get_image_embeddings(ent)), ent, raw };
+    msg("stFoto", "Foto analisada em " + ((performance.now() - t0) / 1000).toFixed(1) + " s. Toque na peça.");
+    ["modo", "desfaz", "limpa"].forEach((i) => { $(i).disabled = false; });
+  } catch (e) { msg("stFoto", "Erro ao analisar a foto: " + (e && e.message || e), true); }
+  espera(false);
+}
+const espera = (b) => { ocupado = b; $("palco").classList.toggle("espera", b); };
+
+$("sobre").addEventListener("click", async (ev) => {
+  if (!emb || ocupado) return;
+  const r = $("sobre").getBoundingClientRect();
+  const x = (ev.clientX - r.left) * $("sobre").width / r.width, y = (ev.clientY - r.top) * $("sobre").height / r.height;
+  pts.push({ x, y, v: dentro ? 1 : 0 });
+  await recorta();
+});
+$("modo").addEventListener("click", () => { dentro = !dentro; $("modo").textContent = dentro ? "Toque = É a peça" : "Toque = NÃO é a peça"; $("modo").classList.toggle("ativo", !dentro); });
+$("desfaz").addEventListener("click", async () => { pts.pop(); await recorta(); });
+$("limpa").addEventListener("click", () => { pts = []; mascara = null; desenha(); msg("stFoto", "Toque na peça."); });
+
+async function recorta() {
+  if (!pts.length) { mascara = null; desenha(); return; }
+  espera(true);
+  try {
+    const t0 = performance.now();
+    const ent = await proc(emb.raw, { input_points: [pts.map((p) => [p.x, p.y])], input_labels: [pts.map((p) => p.v)] });
+    const saida = await modelo({ image_embeddings: emb.image_embeddings, image_positional_embeddings: emb.image_positional_embeddings, input_points: ent.input_points, input_labels: ent.input_labels });
+    const ms = await proc.post_process_masks(saida.pred_masks, ent.original_sizes, ent.reshaped_input_sizes);
+    const iou = saida.iou_scores.data; let m = 0; for (let i = 1; i < iou.length; i++) if (iou[i] > iou[m]) m = i;
+    const t = ms[0], H = t.dims[2], W = t.dims[3], dados = t.data.subarray(m * H * W, (m + 1) * H * W);
+    mascara = { dados, W, H };
+    let n = 0; for (let i = 0; i < dados.length; i++) if (dados[i]) n++;
+    desenha();
+    msg("stFoto", "Peça = " + (100 * n / dados.length).toFixed(1) + " % da foto · confiança " + (iou[m] * 100).toFixed(0) + " % · " + (performance.now() - t0).toFixed(0) + " ms · " + pts.length + " toque(s). Toque de novo para corrigir.");
+  } catch (e) { msg("stFoto", "Erro no recorte: " + (e && e.message || e), true); }
+  espera(false);
+}
+
+function desenha() {
+  const c = $("sobre"), g = c.getContext("2d"); g.clearRect(0, 0, c.width, c.height);
+  if (mascara) {
+    const { dados, W, H } = mascara, im = g.createImageData(W, H), d = im.data;
+    const dentroM = (x, y) => x >= 0 && y >= 0 && x < W && y < H && dados[y * W + x] > 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = 4 * (y * W + x);
+      if (dados[y * W + x]) {
+        const borda = !dentroM(x - 1, y) || !dentroM(x + 1, y) || !dentroM(x, y - 1) || !dentroM(x, y + 1);
+        d[i] = 26; d[i + 1] = 200; d[i + 2] = 240; d[i + 3] = borda ? 255 : 110;
+      }
+    }
+    g.putImageData(im, 0, 0);
+  }
+  const r = Math.max(5, c.width / 90);
+  for (const p of pts) { g.beginPath(); g.arc(p.x, p.y, r, 0, 7); g.fillStyle = p.v ? "#2ecc71" : "#e74c3c"; g.fill(); g.lineWidth = 2; g.strokeStyle = "#fff"; g.stroke(); }
+}
+window.__seg = { get pts() { return pts; }, get mascara() { return mascara; }, get pronto() { return !!emb; }, clica: (x, y) => { pts.push({ x, y, v: 1 }); return recorta(); } };
+</script>
+</body>
+</html>
