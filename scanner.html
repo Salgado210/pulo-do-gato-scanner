@@ -30,16 +30,41 @@
   #vista .vis { stroke: #1a2a35; stroke-width: 1.6; fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; }
   #vista .oc { stroke: #5b7585; stroke-width: 1.1; stroke-dasharray: 5 4; fill: none; vector-effect: non-scaling-stroke; }
   #vista .eixo { stroke: #1a88a8; stroke-width: 1; stroke-dasharray: 14 3 2 3; fill: none; vector-effect: non-scaling-stroke; }
-  #vista text { font-size: 11px; fill: #1a2a35; font-family: 'Segoe UI', sans-serif; }
+  #vista text { fill: #1a2a35; font-family: 'Segoe UI', sans-serif; }
+  #vista .cota { stroke: #1a2a35; stroke-width: 0.8; fill: none; vector-effect: non-scaling-stroke; }
+  #vista .seta { fill: #1a2a35; stroke: none; }
+  #vista .ct { fill: #922b21; font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: Consolas, monospace; }
   th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--borda); }
   th { color: var(--mudo); font-weight: 600; font-family: 'Segoe UI', sans-serif; }
   .peq { font-size: 12px; color: var(--mudo); }
+  #video { width: 100%; max-height: 240px; background: #1a2a35; border-radius: 8px; display: none; object-fit: contain; }
+  #video.on { display: block; }
+  #tiras { display: flex; gap: 4px; overflow-x: auto; }
+  #tiras img { height: 44px; border-radius: 4px; border: 1px solid var(--borda); flex: none; }
+  #anel path { fill: #eef4f8; stroke: var(--borda2); stroke-width: 1; }
+  #anel path.cheio { fill: var(--acento); }
 </style>
 </head>
 <body>
 <main>
   <h1>Scanner — malha para vistas e diâmetros</h1>
+
+  <div class="card">
+    <h2>0 · Câmera</h2>
+    <video id="video" playsinline muted></video>
+    <div class="linha">
+      <button id="camAbre">Abrir câmera</button>
+      <button id="camGrava" class="sec" disabled>Gravar quadros</button>
+      <button id="camLimpa" class="sec" disabled>Limpar</button>
+    </div>
+    <div class="linha">
+      <svg id="anel" viewBox="-60 -60 120 120" width="96" height="96"></svg>
+      <div class="peq" id="camInfo">Câmera fechada. Ponha a peça sobre uma mesa fosca, com luz difusa, e dê a volta devagar mantendo-a no centro da imagem.</div>
+    </div>
+    <div id="tiras"></div>
+    <button id="camGera" disabled>Gerar 3D dos quadros</button>
+  </div>
 
   <div class="card">
     <h2>1 · Peça</h2>
@@ -75,6 +100,7 @@
 
   <div class="card">
     <h2>4 · Vistas</h2>
+    <label class="peq"><input type="checkbox" id="cotas" checked> Mostrar cotas</label>
     <div class="abas" id="abas"><button data-v="frontal" class="on">Frontal</button><button data-v="superior">Superior</button><button data-v="lateral">Lateral</button></div>
     <svg id="vista" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
     <div class="peq">Traço cheio = visível · tracejado = oculto · traço-ponto azul = eixo de furo/cilindro.</div>
@@ -132,6 +158,80 @@
   cv.addEventListener("wheel", (e) => { e.preventDefault(); dist *= e.deltaY > 0 ? 1.1 : 0.9; desenha3D(); }, { passive: false });
   addEventListener("resize", () => malha && desenha3D());
 
+  // ── câmera: guarda os quadros nítidos e diferentes entre si, anota para onde o aparelho apontava ──
+  const N_SETORES = 24, MAX_QUADROS = 150, cap = { fluxo: null, quadros: [], borrados: 0, gravando: false, ant: null, setores: new Array(N_SETORES).fill(0), ori: null, nitidez: [], timer: 0, ocupado: false };
+  const mini = document.createElement("canvas"), mctx = mini.getContext("2d", { willReadFrequently: true });
+  function desenhaAnel() {
+    const r0 = 22, r1 = 52, p = [];
+    for (let i = 0; i < N_SETORES; i++) {
+      const a0 = (i / N_SETORES) * 2 * Math.PI - Math.PI / 2, a1 = ((i + 1) / N_SETORES) * 2 * Math.PI - Math.PI / 2, g = 0.02;
+      const P = (r, a) => (r * Math.cos(a)).toFixed(2) + " " + (r * Math.sin(a)).toFixed(2);
+      p.push(`<path class="${cap.setores[i] ? "cheio" : ""}" d="M ${P(r0, a0 + g)} L ${P(r1, a0 + g)} A ${r1} ${r1} 0 0 1 ${P(r1, a1 - g)} L ${P(r0, a1 - g)} A ${r0} ${r0} 0 0 0 ${P(r0, a0 + g)} Z"/>`);
+    }
+    $("anel").innerHTML = p.join("");
+  }
+  function infoCam() {
+    const cheios = cap.setores.filter(Boolean).length;
+    $("camInfo").textContent = cap.fluxo ? (cap.gravando ? "Gravando: " : "Câmera aberta: ") + cap.quadros.length + " quadros guardados, " + cap.borrados + " borrados descartados. Direções cobertas: " + cheios + " de " + N_SETORES + (cap.ori ? "." : " (sem sensor de giro: a cobertura não é medida).") : "Câmera fechada.";
+    $("camGera").disabled = cap.quadros.length < 20;
+  }
+  // nitidez = variância do Laplaciano na imagem reduzida; diferença = média do |quadro − quadro anterior|
+  function mede() {
+    const v = $("video"), w = 160, h = Math.max(1, Math.round(160 * v.videoHeight / v.videoWidth));
+    mini.width = w; mini.height = h; mctx.drawImage(v, 0, 0, w, h);
+    const d = mctx.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
+    let s = 0, s2 = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const l = 4 * g[y * w + x] - g[y * w + x - 1] - g[y * w + x + 1] - g[(y - 1) * w + x] - g[(y + 1) * w + x]; s += l; s2 += l * l; n++; }
+    const nit = s2 / n - (s / n) * (s / n);
+    let dif = 1;
+    if (cap.ant && cap.ant.length === g.length) { dif = 0; for (let i = 0; i < g.length; i++) dif += Math.abs(g[i] - cap.ant[i]); dif /= g.length * 255; }
+    return { g, nit, dif };
+  }
+  function passo() {
+    const v = $("video");
+    if (!cap.gravando || cap.ocupado || !v.videoWidth || cap.quadros.length >= MAX_QUADROS) { if (cap.quadros.length >= MAX_QUADROS) camGrava(false); return; }
+    const m = mede(), ref = Math.max(...cap.nitidez.slice(-30), m.nit);
+    cap.nitidez.push(m.nit);
+    if (m.nit < ref * 0.55) { cap.borrados++; infoCam(); return; } // quadro borrado
+    const ori = cap.ori ? { a: cap.ori.a, b: cap.ori.b, g: cap.ori.g } : null, u = cap.quadros[cap.quadros.length - 1];
+    const dAng = ori && u && u.ori ? Math.abs(((ori.a - u.ori.a + 540) % 360) - 180) : 0;
+    if (u && m.dif < 0.05 && dAng < 5) return; // quase igual ao último: não repete
+    cap.ocupado = true;
+    const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext("2d").drawImage(v, 0, 0);
+    c.toBlob((b) => {
+      cap.ocupado = false;
+      if (!b) return;
+      const q = { blob: b, t: Date.now(), ori, nitidez: m.nit, w: c.width, h: c.height };
+      cap.quadros.push(q); cap.ant = m.g;
+      if (ori) cap.setores[Math.floor(((ori.a % 360) + 360) % 360 / (360 / N_SETORES))]++;
+      const im = new Image(); im.src = URL.createObjectURL(b); $("tiras").appendChild(im); $("tiras").scrollLeft = 1e6;
+      desenhaAnel(); infoCam();
+    }, "image/jpeg", 0.9);
+  }
+  function camGrava(liga) {
+    cap.gravando = liga; $("camGrava").textContent = liga ? "Parar de gravar" : "Gravar quadros";
+    clearInterval(cap.timer); if (liga) cap.timer = setInterval(passo, 200);
+    infoCam();
+  }
+  async function camAbre() {
+    if (cap.fluxo) { cap.fluxo.getTracks().forEach((t) => t.stop()); cap.fluxo = null; camGrava(false); $("video").classList.remove("on"); $("camAbre").textContent = "Abrir câmera"; $("camGrava").disabled = true; infoCam(); return; }
+    try {
+      if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) await DeviceOrientationEvent.requestPermission().catch(() => {});
+      cap.fluxo = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      const v = $("video"); v.srcObject = cap.fluxo; await v.play(); v.classList.add("on");
+      $("camAbre").textContent = "Fechar câmera"; $("camGrava").disabled = false; $("camLimpa").disabled = false;
+      addEventListener("deviceorientation", (e) => { if (e.alpha != null) cap.ori = { a: e.alpha, b: e.beta, g: e.gamma }; });
+      infoCam();
+    } catch (e) { cap.fluxo = null; msg("Não consegui abrir a câmera: " + (e && e.message || e) + ". A câmera exige página em https (ou localhost) e a sua permissão.", true); }
+  }
+  $("camAbre").addEventListener("click", camAbre);
+  $("camGrava").addEventListener("click", () => camGrava(!cap.gravando));
+  $("camLimpa").addEventListener("click", () => { cap.quadros = []; cap.borrados = 0; cap.ant = null; cap.nitidez = []; cap.setores.fill(0); $("tiras").innerHTML = ""; desenhaAnel(); infoCam(); });
+  $("camGera").addEventListener("click", () => msg("A reconstrução dos quadros em 3D ainda não foi feita: é o próximo passo. Os " + cap.quadros.length + " quadros já estão guardados na página.", true));
+  desenhaAnel();
+  window.__cap = cap; // só para a bancada no navegador
+
   // ── análise e telas ──
   function reposiciona() { // canto da caixa no zero
     const c = scnCaixa(malha);
@@ -147,11 +247,42 @@
   }
   function desenhaVista() {
     const v = relatorio.vistas[vistaAtual], svg = $("vista"), c = v.caixa;
-    const larg = c.u1 - c.u0 || 1, alt = c.v1 - c.v0 || 1, m = Math.max(larg, alt) * 0.08;
-    svg.setAttribute("viewBox", [c.u0 - m, -(c.v1 + m), larg + 2 * m, alt + 2 * m].join(" "));
+    const larg = c.u1 - c.u0 || 1, alt = c.v1 - c.v0 || 1, S = Math.max(larg, alt), ta = S * 0.022, tt = S * 0.04, off = S * 0.09;
+    const comCotas = $("cotas").checked;
     const L = (s, cl) => `<line class="${cl}" x1="${s[0].toFixed(3)}" y1="${(-s[1]).toFixed(3)}" x2="${s[2].toFixed(3)}" y2="${(-s[3]).toFixed(3)}"/>`;
-    // eixos dos cilindros que aparecem de frente (círculos) ou de lado (retas) nesta vista
+    // ── as COTAS: linha de cota com setas, linhas de chamada e o valor em mm ──
+    const f = (n) => n.toFixed(3);
+    const seta = (x, y, dx, dy) => { const bx = x - dx * ta * 2.2, by = y - dy * ta * 2.2, px = -dy * ta * 0.6, py = dx * ta * 0.6; return `<path class="seta" d="M ${f(x)} ${f(-y)} L ${f(bx + px)} ${f(-(by + py))} L ${f(bx - px)} ${f(-(by - py))} Z"/>`; };
+    const cotaH = (x1, x2, y, ref, txt) => { const s = y >= ref ? 1 : -1; return L([x1, ref + s * ta * 0.5, x1, y + s * ta * 0.7], "cota") + L([x2, ref + s * ta * 0.5, x2, y + s * ta * 0.7], "cota") + L([x1, y, x2, y], "cota") + seta(x1, y, -1, 0) + seta(x2, y, 1, 0) + `<text x="${f((x1 + x2) / 2)}" y="${f(-y - ta * 0.7)}" text-anchor="middle" class="ct" style="font-size:${f(tt)}px">${txt}</text>`; };
+    const cotaV = (y1, y2, x, ref, txt) => { const s = x >= ref ? 1 : -1; return L([ref + s * ta * 0.5, y1, x + s * ta * 0.7, y1], "cota") + L([ref + s * ta * 0.5, y2, x + s * ta * 0.7, y2], "cota") + L([x, y1, x, y2], "cota") + seta(x, y1, 0, -1) + seta(x, y2, 0, 1) + `<text transform="translate(${f(x + s * ta * 1.8)} ${f(-(y1 + y2) / 2)}) rotate(-90)" text-anchor="middle" class="ct" style="font-size:${f(tt)}px">${txt}</text>`; };
     const V = SCN_VISTAS[vistaAtual], proj = (p) => [p[0] * V.u[0] + p[1] * V.u[1] + p[2] * V.u[2], p[0] * V.v[0] + p[1] * V.v[1] + p[2] * V.v[2]];
+    const ponto = (cl, t) => { const p = [0, 0, 0]; p[cl.plano[0]] = cl.centro[0]; p[cl.plano[1]] = cl.centro[1]; p[cl.eixo] = t; return p; };
+    let cotas = "", nCima = 1, nDir = 1;
+    if (comCotas) {
+      cotas += cotaH(c.u0, c.u1, c.v0 - off, c.v0, fmt(larg)) + cotaV(c.v0, c.v1, c.u1 + off, c.u1, fmt(alt));
+      const vistos = new Set(), quantos = {}, chaveDe = (cl) => cl.eixo + "|" + (cl.furo ? "f" : "e") + "|" + cl.diametro.toFixed(2);
+      relatorio.cilindros.forEach((cl) => { quantos[chaveDe(cl)] = (quantos[chaveDe(cl)] || 0) + 1; });
+      relatorio.cilindros.forEach((cl) => {
+        const chave = chaveDe(cl); if (vistos.has(chave)) return; vistos.add(chave);
+        const rotulo = (quantos[chave] > 1 ? quantos[chave] + "× " : "") + "⌀" + fmt(cl.diametro);
+        const r = cl.diametro / 2, a = proj(ponto(cl, cl.de)), b = proj(ponto(cl, cl.ate));
+        if (Math.abs(V.w[cl.eixo]) > 0.5) { // visto de frente: círculo com chamada a 45°
+          if (!cl.furo && Math.abs(cl.diametro - larg) < larg * 0.01) return; // o externo que é a própria largura já está cotado
+          const ex = a[0] + r * 0.7071, ey = a[1] + r * 0.7071, fx = ex + r * 0.9, fy = ey + r * 0.9;
+          cotas += L([ex, ey, fx, fy], "cota") + L([fx, fy, fx + tt * 3, fy], "cota") + `<text x="${f(fx + tt * 0.2)}" y="${f(-fy - ta * 0.5)}" class="ct" style="font-size:${f(tt)}px">${rotulo}</text>`;
+        } else if (Math.abs(V.v[cl.eixo]) > 0.5) { // eixo na vertical: o ⌀ é uma cota horizontal acima da vista
+          if (!cl.furo && Math.abs(cl.diametro - larg) < larg * 0.01) return;
+          cotas += cotaH(a[0] - r, a[0] + r, c.v1 + off * nCima++, Math.max(a[1], b[1]), rotulo);
+        } else { // eixo na horizontal: cota vertical à direita
+          if (!cl.furo && Math.abs(cl.diametro - alt) < alt * 0.01) return;
+          cotas += cotaV(a[1] - r, a[1] + r, c.u1 + off * ++nDir, Math.max(a[0], b[0]), rotulo);
+        }
+      });
+    }
+    const m = S * 0.08 + (comCotas ? S * 0.18 : 0);
+    const x0 = c.u0 - m, x1 = c.u1 + m + (comCotas ? off * (nDir - 1) + S * 0.1 : 0), yTop = c.v1 + m + (comCotas ? off * (nCima - 1) : 0), yBase = c.v0 - m;
+    svg.setAttribute("viewBox", [f(x0), f(-yTop), f(x1 - x0), f(yTop - yBase)].join(" "));
+    // eixos dos cilindros que aparecem de frente (círculos) ou de lado (retas) nesta vista
     let eixos = "";
     relatorio.cilindros.forEach((cl) => {
         const p0 = [0, 0, 0], p1 = [0, 0, 0]; p0[cl.plano[0]] = p1[cl.plano[0]] = cl.centro[0]; p0[cl.plano[1]] = p1[cl.plano[1]] = cl.centro[1]; p0[cl.eixo] = cl.de; p1[cl.eixo] = cl.ate;
@@ -160,9 +291,7 @@
             eixos += L([a[0] - cl.diametro * 0.7, a[1], a[0] + cl.diametro * 0.7, a[1]], "eixo") + L([a[0], a[1] - cl.diametro * 0.7, a[0], a[1] + cl.diametro * 0.7], "eixo");
         } else { const dx = b[0] - a[0], dy = b[1] - a[1], n = Math.hypot(dx, dy); eixos += L([a[0] - dx / n * ext, a[1] - dy / n * ext, b[0] + dx / n * ext, b[1] + dy / n * ext], "eixo"); }
     });
-    const tx = (x, y, t, a) => `<text x="${x}" y="${-y}" text-anchor="${a}" style="font-size:${Math.max(larg, alt) * 0.045}px">${t}</text>`;
-    svg.innerHTML = eixos + v.ocultas.map((s) => L(s, "oc")).join("") + v.visiveis.map((s) => L(s, "vis")).join("") +
-        tx(c.u0 + larg / 2, c.v0 - m * 0.45, fmt(larg), "middle") + tx(c.u1 + m * 0.2, c.v0 + alt / 2, fmt(alt), "start");
+    svg.innerHTML = eixos + v.ocultas.map((s) => L(s, "oc")).join("") + v.visiveis.map((s) => L(s, "vis")).join("") + cotas;
   }
   function preencheTabela() {
     $("tab").tBodies[0].innerHTML = relatorio.cilindros.map((c) => {
@@ -197,6 +326,7 @@
   document.querySelectorAll("#abas button").forEach((b) => b.addEventListener("click", () => {
     vistaAtual = b.dataset.v; document.querySelectorAll("#abas button").forEach((x) => x.classList.toggle("on", x === b)); if (relatorio) desenhaVista();
   }));
+  $("cotas").addEventListener("change", () => relatorio && desenhaVista());
   $("exemplo").addEventListener("click", async () => {
     msg("Montando o exemplo…");
     try {
