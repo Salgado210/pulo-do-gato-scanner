@@ -35,16 +35,16 @@
 <body>
 <h1>Scanner · toque na peça e ela é recortada</h1>
 
-<div class="card">
-  <b>1 · Modelo</b>
+<details class="card" id="cartaoModelo">
+  <summary><b>Só se o fundo NÃO for liso: usar IA</b> <span class="peq">(pesado, pode travar celular fraco)</span></summary>
   <div class="peq">Modelo de IA (SlimSAM) que roda no próprio celular. Baixa uma vez e fica guardado; depois funciona sem internet.</div>
   <div class="linha"><button id="carrega">Carregar modelo</button></div>
   <div id="barra"><i></i></div>
   <div class="peq" id="stModelo">Modelo ainda não carregado.</div>
-</div>
+</details>
 
 <div class="card">
-  <b>2 · Foto da peça</b>
+  <b>1 · Foto da peça (fundo preto ou azul liso)</b>
   <div class="linha">
     <button id="camAbre">Fotografar a peça</button>
     <label class="bt sec" for="arq">Escolher da galeria</label>
@@ -59,7 +59,7 @@
     <button id="desfaz" class="sec" disabled>Desfazer</button>
     <button id="limpa" class="sec" disabled>Limpar</button>
   </div>
-  <div class="peq" id="stFoto">Carregue o modelo e escolha uma foto. Depois toque na peça.</div>
+  <div class="peq" id="stFoto">Coloque a peça num fundo liso, fotografe e o esboço sai sozinho.</div>
 </div>
 
 <div id="camTela" hidden>
@@ -80,14 +80,21 @@
 </div>
 
 <script type="module">
-import { SamModel, AutoProcessor, RawImage, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2";
+let SamModel, AutoProcessor, RawImage, env; // a biblioteca de IA só é baixada se o usuário pedir o modelo
 const $ = (id) => document.getElementById(id);
 const MODELO = "Xenova/slimsam-77-uniform";
 const LADO = 1024; // maior lado da foto enviada ao modelo
 let viaModelo = false, gpuAtivo = false, modelo = null, proc = null, emb = null, imagem = null, pts = [], dentro = true, ocupado = false, mascara = null;
 
-env.allowLocalModels = false;
-env.useBrowserCache = true; // guarda o modelo no celular (Cache API): da segunda vez não precisa de internet
+async function carregaLib() {
+  if (SamModel) return;
+  ({ SamModel, AutoProcessor, RawImage, env } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2"));
+  env.allowLocalModels = false;
+  env.useBrowserCache = true; // guarda o modelo no celular (Cache API): da segunda vez não precisa de internet
+}
+// diário do último passo: se a página fechar por falta de memória, na próxima abertura ela diz onde foi
+const passo = (t) => { try { localStorage.setItem("seg_passo", t); } catch (e) {} };
+try { const u = localStorage.getItem("seg_passo"); if (u && u !== "fim") setTimeout(() => msg("stFoto", "Da última vez a página fechou durante: " + u + ".", true), 300); } catch (e) {}
 
 let carregaModelo = null;
 const msg = (id, t, erro) => { const e = $(id); e.textContent = t; e.classList.toggle("erro", !!erro); };
@@ -105,7 +112,7 @@ $("carrega").addEventListener("click", async () => {
     }
   };
   try {
-    msg("stModelo", "Iniciando o download…");
+    passo("carregando o modelo de IA"); await carregaLib(); msg("stModelo", "Iniciando o download…");
     // a análise da foto é a parte pesada: com placa de vídeo (WebGPU) ela é bem mais rápida; sem ela, cai para o processador
     let gpu = false;
     try { const ad = navigator.gpu && await navigator.gpu.requestAdapter(); gpu = !!(ad && ad.features.has("shader-f16")); } catch (e) {}
@@ -115,7 +122,7 @@ $("carrega").addEventListener("click", async () => {
     proc = await AutoProcessor.from_pretrained(MODELO, { progress_callback: progresso });
     try { modelo = await carregaModelo(gpu); } catch (e) { if (!gpu) throw e; gpu = false; modelo = await carregaModelo(false); }
     gpuAtivo = gpu;
-    $("barra").firstElementChild.style.width = "100%";
+    passo("fim"); $("barra").firstElementChild.style.width = "100%";
     msg("stModelo", "Modelo pronto em " + ((performance.now() - t0) / 1000).toFixed(1) + " s · rodando " + (gpu ? "na placa de vídeo (WebGPU)" : "no processador (mais lento)") + ".");
     if (imagem) await preparaFoto();
   } catch (e) { modelo = null; $("carrega").disabled = false; msg("stModelo", "Não consegui carregar o modelo: " + (e && e.message || e), true); }
@@ -130,13 +137,14 @@ $("arq").addEventListener("change", async (ev) => {
 });
 let fluxo = null;
 $("camAbre").addEventListener("click", async () => {
+  passo("abrindo a câmera");
   try { fluxo = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }); }
   catch (e) { msg("stFoto", "Não consegui abrir a câmera: " + (e && e.message || e) + ". Use \"Escolher da galeria\".", true); return; }
-  const v = $("video"); v.srcObject = fluxo; await v.play(); $("camTela").hidden = false;
+  const v = $("video"); v.srcObject = fluxo; await v.play(); $("camTela").hidden = false; passo("fim");
 });
 const fechaCam = () => { if (fluxo) fluxo.getTracks().forEach((t) => t.stop()); fluxo = null; $("video").srcObject = null; $("camTela").hidden = true; };
 $("camFecha").addEventListener("click", fechaCam);
-$("camFoto").addEventListener("click", () => { const v = $("video"); if (!v.videoWidth) return; usaImagem(v, v.videoWidth, v.videoHeight); fechaCam(); });
+$("camFoto").addEventListener("click", () => { passo("tirando a foto"); const v = $("video"); if (!v.videoWidth) return; usaImagem(v, v.videoWidth, v.videoHeight); fechaCam(); });
 const teste = new URLSearchParams(location.search).get("img");
 if (teste) abreFoto(teste);
 
@@ -147,27 +155,28 @@ function abreFoto(url) {
   im.src = url;
 }
 async function usaImagem(im, iw, ih) {
+  passo("lendo a foto");
   {
     const k = Math.min(1, LADO / Math.max(iw, ih));
     const w = Math.round(iw * k), h = Math.round(ih * k);
     for (const c of [$("foto"), $("sobre")]) { c.width = w; c.height = h; }
     $("foto").getContext("2d").drawImage(im, 0, 0, w, h);
     imagem = $("foto"); pts = []; mascara = null; emb = null; $("palco").hidden = false; desenha();
-    const ch = chaveFundo();
-    if (ch) { viaModelo = false; mascara = ch; desenha(); esboco(); msg("stFoto", "Fundo liso detectado (cor " + ch.fundo.map(Math.round).join(",") + "): peça separada sem IA e sem toque."); return; }
+    passo("separando a peça do fundo"); const ch = chaveFundo();
+    if (ch) { viaModelo = false; mascara = ch; passo("desenhando o esboço"); desenha(); esboco(); passo("fim"); msg("stFoto", "Fundo liso detectado (cor " + ch.fundo.map(Math.round).join(",") + "): peça separada sem IA e sem toque."); return; }
     viaModelo = true;
     if (modelo) await preparaFoto(); else msg("stFoto", "O fundo não é liso, então preciso do modelo de IA. Toque em Carregar modelo.");
   }
 }
 
 async function preparaFoto() {
-  espera(true); msg("stFoto", "Analisando a foto (só na primeira vez de cada foto)…");
+  passo("IA analisando a foto"); espera(true); msg("stFoto", "Analisando a foto (só na primeira vez de cada foto)…");
   try {
     const t0 = performance.now();
     const raw = await RawImage.fromCanvas(imagem);
     const ent = await proc(raw);
     emb = { ...(await modelo.get_image_embeddings(ent)), ent, raw };
-    msg("stFoto", "Foto analisada em " + ((performance.now() - t0) / 1000).toFixed(1) + " s. Toque na peça.");
+    passo("fim"); msg("stFoto", "Foto analisada em " + ((performance.now() - t0) / 1000).toFixed(1) + " s. Toque na peça.");
     ["modo", "desfaz", "limpa"].forEach((i) => { $(i).disabled = false; });
     const a = await achaPeca(); // automático: ninguém precisa tocar
     if (a) { pts = [a.p]; mascara = { dados: a.dados, W: a.W, H: a.H }; desenha(); esboco(); msg("stFoto", "Peça achada sozinha (confiança " + (a.iou * 100).toFixed(0) + " %). Se errou, toque na peça para corrigir."); }
@@ -315,26 +324,28 @@ function furosEscuros(m) { // o modelo costuma incluir o interior escuro do furo
 function chaveFundo() {
   const c = $("foto"), W = c.width, H = c.height, d = c.getContext("2d").getImageData(0, 0, W, H).data, B = Math.max(4, Math.round(0.03 * Math.min(W, H)));
   const borda = (x, y) => x < B || y < B || x >= W - B || y >= H - B;
-  let r = [], g = [], b = [];
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) { const i = 4 * (y * W + x); r.push(d[i]); g.push(d[i + 1]); b.push(d[i + 2]); }
-  const med = (a) => { a = a.slice().sort((p, q) => p - q); return a[a.length >> 1]; }, fr = [med(r), med(g), med(b)];
-  const dist = new Float32Array(W * H), db = [];
-  for (let i = 0; i < W * H; i++) { dist[i] = Math.hypot(d[4 * i] - fr[0], d[4 * i + 1] - fr[1], d[4 * i + 2] - fr[2]); }
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) db.push(dist[y * W + x]);
-  db.sort((p, q) => p - q); const p95 = db[Math.floor(db.length * 0.95)];
+  const hr = new Uint32Array(256), hg = new Uint32Array(256), hb = new Uint32Array(256); let nb = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (borda(x, y)) { const i = 4 * (y * W + x); hr[d[i]]++; hg[d[i + 1]]++; hb[d[i + 2]]++; nb++; }
+  const med = (h) => { let a = 0; for (let v = 0; v < 256; v++) { a += h[v]; if (a >= nb / 2) return v; } return 0; }, fr = [med(hr), med(hg), med(hb)];
+  const dist = new Float32Array(W * H), hd = new Uint32Array(1024);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; dist[i] = Math.hypot(d[4 * i] - fr[0], d[4 * i + 1] - fr[1], d[4 * i + 2] - fr[2]); if (borda(x, y)) hd[Math.min(1023, dist[i] | 0)]++; }
+  let acc = 0, p95 = 0; for (let v = 0; v < 1024; v++) { acc += hd[v]; if (acc >= 0.95 * nb) { p95 = v; break; } }
   if (p95 > 45) return null; // a borda não é um fundo liso: cai para o modelo de IA
-  const T = Math.max(40, 3 * p95), dados = new Uint8Array(W * H);
-  for (let i = 0; i < W * H; i++) dados[i] = dist[i] > T ? 1 : 0;
-  // fica só a maior mancha (a peça): tira poeira e respingos do fundo
-  const vis = new Uint8Array(W * H); let melhor = null;
+  const T = Math.max(40, 3 * p95), lab = new Int32Array(W * H), pil = new Int32Array(W * H); let melhor = 0, nMelhor = 0, nl = 0;
   for (let i0 = 0; i0 < W * H; i0++) {
-    if (!dados[i0] || vis[i0]) continue;
-    const pil = [i0], comp = []; vis[i0] = 1;
-    while (pil.length) { const i = pil.pop(); comp.push(i); const x = i % W, y = (i / W) | 0; for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) if (j >= 0 && dados[j] && !vis[j]) { vis[j] = 1; pil.push(j); } }
-    if (!melhor || comp.length > melhor.length) melhor = comp;
+    if (dist[i0] <= T || lab[i0]) continue;
+    nl++; let sp = 0, n = 0; pil[sp++] = i0; lab[i0] = nl;
+    while (sp) {
+      const i = pil[--sp]; n++; const x = i % W, y = (i / W) | 0;
+      if (x > 0 && !lab[i - 1] && dist[i - 1] > T) { lab[i - 1] = nl; pil[sp++] = i - 1; }
+      if (x < W - 1 && !lab[i + 1] && dist[i + 1] > T) { lab[i + 1] = nl; pil[sp++] = i + 1; }
+      if (y > 0 && !lab[i - W] && dist[i - W] > T) { lab[i - W] = nl; pil[sp++] = i - W; }
+      if (y < H - 1 && !lab[i + W] && dist[i + W] > T) { lab[i + W] = nl; pil[sp++] = i + W; }
+    }
+    if (n > nMelhor) { nMelhor = n; melhor = nl; }
   }
-  if (!melhor || melhor.length < 0.01 * W * H) return null;
-  const out = new Uint8Array(W * H); for (const i of melhor) out[i] = 1;
+  if (!melhor || nMelhor < 0.01 * W * H) return null;
+  const out = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) out[i] = lab[i] === melhor ? 1 : 0;
   return { dados: out, W, H, fundo: fr };
 }
 function esboco() {
@@ -342,8 +353,8 @@ function esboco() {
   const ls = lacos(mascara).map((p) => ({ p, a: Math.abs(areaS(p)) })).sort((x, y) => y.a - x.a);
   if (!ls.length) return;
   const ext = ls[0], mini = ext.a * 0.002; // ignora furos menores que 0,2 % da peça
-  const xs = ext.p.map((q) => q[0]), ys = ext.p.map((q) => q[1]);
-  const caixa = { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  const caixa = { x0: 1e9, x1: -1, y0: 1e9, y1: -1 };
+  for (const q of ext.p) { if (q[0] < caixa.x0) caixa.x0 = q[0]; if (q[0] > caixa.x1) caixa.x1 = q[0]; if (q[1] < caixa.y0) caixa.y0 = q[1]; if (q[1] > caixa.y1) caixa.y1 = q[1]; }
   const eps = Math.max(1.5, 0.006 * Math.max(caixa.x1 - caixa.x0, caixa.y1 - caixa.y0));
   const forma = (l) => { const c = circulo(l.p); return c ? { tipo: "circ", ...c } : { tipo: "poli", pts: dp(l.p, eps) }; };
   const escuros = (viaModelo ? furosEscuros(mascara) : []).map((m2) => lacos(m2).map((p) => ({ p, a: Math.abs(areaS(p)) })).sort((x, y) => y.a - x.a)[0]).filter(Boolean);
